@@ -91,6 +91,20 @@ logging hooks are available through `WithRequestOptions`.
 
 ## Local development and SDK fork
 
+`FilesetInventory(ctx, InventoryLimits{MaxPages: 30, MaxObjects: 10000})` is an
+additive monitoring read; legacy fileset methods retain their original behavior.
+It requires a deadline and traverses the Windows/Linux/NAS fileset roots through
+the SDK with one attempt per page. Limits are global across roots: 3-30 pages,
+1-10000 objects, 100 templates/descendants per connection, 4 MiB per response and
+4096 bytes per cursor. It fails closed on missing connections, nodes/page status,
+nonadvancing/cyclic cursors, duplicates, missing immutable workload/cluster IDs,
+truncated descendants or any page failure. Errors return no partial inventory.
+Successful empty slices are non-nil; incomplete results wrap/return an error.
+`EffectiveSLAID` preserves presence: nil is unknown, not unprotected. The caller
+must verify tenant permissions, source scope and policy semantics before using
+these fields; this API does not certify SLA compliance or live tenant support.
+It creates no cache, persistence, daemon or parallel authentication layer.
+
 This module is published at https://github.com/otuschhoff/rsc-go. It includes a narrowly patched SDK in
 [third_party/rubrik-polaris-sdk-for-go](third_party/rubrik-polaris-sdk-for-go).
 See [SDK_FORK.md](SDK_FORK.md) for the base revision, exact extension and upgrade
