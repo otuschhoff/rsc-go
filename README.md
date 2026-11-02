@@ -91,18 +91,21 @@ logging hooks are available through `WithRequestOptions`.
 
 ## Local development and SDK fork
 
-This module is currently unpublished. It includes a narrowly patched SDK in
+This module is published at https://github.com/otuschhoff/rsc-go. It includes a narrowly patched SDK in
 [third_party/rubrik-polaris-sdk-for-go](third_party/rubrik-polaris-sdk-for-go).
 See [SDK_FORK.md](SDK_FORK.md) for the base revision, exact extension and upgrade
-procedure. Go does not propagate dependency `replace` directives. A consumer
-using sibling checkouts must include **both** replacements:
+procedure. Go does not propagate dependency `replace` directives. Consumers must
+explicitly replace the SDK with the nested module published at the same commit:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.0.0
+require github.com/otuschhoff/rsc-go v0.0.0-20261102173521-d9afd9c9fb40
 
-replace github.com/otuschhoff/rsc-go => ../rsc-go
-replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => ../rsc-go/third_party/rubrik-polaris-sdk-for-go
+replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```
+
+For local sibling development, replace rsc-go with `../rsc-go` and change the
+SDK replacement to `../rsc-go/third_party/rubrik-polaris-sdk-for-go`. No local
+replacement is needed for normal consumers.
 
 Run independently:
 
@@ -115,5 +118,5 @@ go test -race ./pkg/polaris/graphql ./pkg/polaris/token -count=1 -timeout=3m
 
 The root test command does not traverse nested modules. Tests use synthetic
 credentials and local/fake transports, not live RSC. A runnable monitoring daemon,
-public repository/release and upstream contribution remain separate follow-up
+tagged release and upstream contribution remain separate follow-up
 work; no daemon is installed by this library.

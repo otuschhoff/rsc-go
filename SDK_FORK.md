@@ -5,7 +5,8 @@ Base: `github.com/rubrikinc/rubrik-polaris-sdk-for-go v1.11.0`, upstream commit
 
 The [vendored source](third_party/rubrik-polaris-sdk-for-go) retains the upstream
 module identity, original files and [MIT license](third_party/rubrik-polaris-sdk-for-go/LICENSE).
-It is a local development fork, not an upstream release or published fork.
+Its source is published inside the rsc-go repository, including as a nested Go
+module. It is not an upstream release or a separately tagged fork.
 
 ## Delta
 
@@ -41,8 +42,8 @@ and underlying transport errors, and delegates execution to
    authorized. If an equivalent supported upstream hook lands, remove the local
    extension and both explicit SDK replacements only after the same tests pass.
 
-Go `replace` directives are not transitive. Every consumer using this unpublished
-fork needs its own SDK replacement, as shown in [README.md](README.md).
-Publishing rsc-go alone does not remove that requirement. A versioned fork or
-accepted upstream extension is required before a clean external checkout can
-depend solely on published modules.
+Go `replace` directives are not transitive. Every consumer needs its own SDK
+replacement, as shown in [README.md](README.md). Both rsc-go and its nested SDK
+module can be pinned to the same published commit through a Go pseudo-version;
+no sibling checkout is required. Publication does not remove the need for the
+explicit replacement. An accepted upstream extension would allow its removal.
