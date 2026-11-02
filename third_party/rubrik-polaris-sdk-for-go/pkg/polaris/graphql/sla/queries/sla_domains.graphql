@@ -1,0 +1,11 @@
+query RubrikPolarisSDKRequest($after: String, $filter: [GlobalSlaFilterInput!]) {
+    result: slaDomains(sortBy: NAME, sortOrder: ASC, after: $after,  filter: $filter) {
+        nodes {
+            ...GlobalSlaReplyFields
+        }
+        pageInfo {
+            endCursor
+            hasNextPage
+        }
+    }
+}

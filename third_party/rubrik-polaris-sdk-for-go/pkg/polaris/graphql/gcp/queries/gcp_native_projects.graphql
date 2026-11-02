@@ -1,0 +1,29 @@
+query RubrikPolarisSDKRequest($after: String, $filter: String!) {
+    result: gcpNativeProjects(after: $after, projectFilters: {nameOrNumberSubstringFilter: {nameOrNumberSubstring: $filter}}){
+        count
+        edges {
+            node {
+                id
+                cloudAccountId
+                name
+                nativeId
+                nativeName
+                projectNumber
+                organizationName
+                slaAssignment
+                configuredSlaDomain{
+                    id
+                    name
+                }
+                effectiveSlaDomain{
+                    id
+                    name
+                }
+            }
+        }
+        pageInfo {
+            endCursor
+            hasNextPage
+        }
+    }
+}

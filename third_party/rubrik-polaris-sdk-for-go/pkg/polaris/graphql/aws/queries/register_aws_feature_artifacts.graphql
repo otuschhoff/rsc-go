@@ -1,0 +1,9 @@
+mutation RubrikPolarisSDKRequest($cloudType: AwsCloudType, $awsArtifacts: [AwsAccountFeatureArtifact!]!, $roleChainingAccountId: UUID) {
+    result: registerAwsFeatureArtifacts(input: {cloudType: $cloudType, awsArtifacts: $awsArtifacts, roleChainingAccountId: $roleChainingAccountId}) {
+        allAwsNativeIdtoRscIdMappings {
+            awsCloudAccountId
+            awsNativeId
+            message
+        }
+    }
+}

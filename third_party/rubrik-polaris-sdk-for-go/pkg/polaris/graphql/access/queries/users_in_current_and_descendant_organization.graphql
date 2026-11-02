@@ -1,0 +1,23 @@
+query RubrikPolarisSDKRequest($after: String, $filter: UserFilterInput) {
+    result: usersInCurrentAndDescendantOrganization(
+        after:  $after,
+        filter: $filter,
+    ) {
+        nodes {
+            id
+            email
+            domain
+            status
+            isAccountOwner
+            groups
+            roles {
+                id
+                name
+            }
+        }
+        pageInfo {
+            endCursor
+            hasNextPage
+        }
+    }
+}

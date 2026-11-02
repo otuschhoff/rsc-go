@@ -1,0 +1,53 @@
+query RubrikPolarisSDKRequest(
+    $cloudAccountIDs:            [UUID!],
+    $azureExocomputeSearchQuery: String!
+) {
+    result: allAzureExocomputeConfigsInAccount(
+        cloudAccountIDs:            $cloudAccountIDs,
+        azureExocomputeSearchQuery: $azureExocomputeSearchQuery
+    ) {
+        azureCloudAccount {
+            id
+            name
+            nativeId
+            featureDetail {
+                feature
+                regions
+                status
+            }
+        }
+        configs {
+            configUuid
+            healthCheckStatus {
+                failureReason
+                lastUpdatedAt
+                status
+                taskchainId
+            }
+            isRscManaged
+            message
+            podOverlayNetworkCidr
+            podSubnetNativeId
+            region
+            subnetNativeId
+            optionalConfig {
+                additionalWhitelistIps
+                aksClusterAccessType
+                aksClusterTier
+                diskEncryptionAtHost
+                aksCustomPrivateDnsZoneId
+                aksNodeCountBucket
+                aksNodeRgPrefix
+                privateDnsZoneId
+                enableUserDefinedRouting
+                shouldWhitelistRubrikIps
+            }
+        }
+        exocomputeEligibleRegions
+        featureDetails {
+            feature
+            regions
+            status
+        }
+    }
+}

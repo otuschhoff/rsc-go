@@ -1,0 +1,15 @@
+query RubrikPolarisSDKRequest($roleIds: [String!]!) {
+    result: getRolesByIds(roleIds: $roleIds) {
+        id
+        name
+        description
+        isOrgAdmin
+        explicitlyAssignedPermissions {
+            operation
+            objectsForHierarchyTypes {
+                objectIds
+                snappableType
+            }
+        }
+    }
+}

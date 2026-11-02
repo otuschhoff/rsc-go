@@ -1,0 +1,29 @@
+query RubrikPolarisSDKRequest($features: [CloudAccountFeature!]!) {
+    result: allAzureLatestPermissionsByPermissionsGroup(features: $features) {
+        feature
+        permissionsGroupPermissions {
+            permissionsGroup
+            version
+            subscriptionPermissions {
+                includedActionsWithUseCase {
+                    permission
+                    useCase
+                }
+                includedDataActionsWithUseCase {
+                    permission
+                    useCase
+                }
+            }
+            resourceGroupPermissions {
+                includedActionsWithUseCase {
+                    permission
+                    useCase
+                }
+                includedDataActionsWithUseCase {
+                    permission
+                    useCase
+                }
+            }
+        }
+    }
+}

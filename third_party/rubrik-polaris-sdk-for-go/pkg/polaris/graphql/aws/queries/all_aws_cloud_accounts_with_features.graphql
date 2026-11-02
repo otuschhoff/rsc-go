@@ -1,0 +1,44 @@
+query RubrikPolarisSDKRequest(
+  $feature: CloudAccountFeature!
+  $columnSearchFilter: String!
+  $statusFilters: [CloudAccountStatus!]!
+) {
+  result: allAwsCloudAccountsWithFeatures(
+    awsCloudAccountsArg: {
+      columnSearchFilter: $columnSearchFilter
+      statusFilters: $statusFilters
+      feature: $feature
+    }
+  ) {
+    awsCloudAccount {
+      cloudType
+      id
+      nativeId
+      message
+      accountName
+    }
+    featureDetails {
+      feature
+      permissionsGroups
+      roleArn
+      stackArn
+      status
+      awsRegions
+      roleChainingDetails {
+        roleArn
+        roleUrl
+      }
+      mappedAccounts {
+        account {
+          id
+          accountName
+        }
+      }
+    }
+    roleChainingAccount {
+      awsCloudAccount {
+        id
+      }
+    }
+  }
+}

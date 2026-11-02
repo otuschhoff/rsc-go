@@ -1,0 +1,18 @@
+query RubrikPolarisSDKRequest($id: UUID!) {
+  result: cluster(clusterUuid: $id) {
+    id
+    name
+    version
+    status
+    timezone
+    rawAddress
+    geoLocation {
+      address
+    }
+    ipmiInfo {
+      isAvailable
+      usesHttps
+      usesIkvm
+    }
+  }
+}

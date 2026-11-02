@@ -1,0 +1,96 @@
+// Copyright 2021 Rubrik, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to
+// deal in the Software without restriction, including without limitation the
+// rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris"
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/gcp"
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/graphql/core"
+	polarislog "github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/log"
+)
+
+// Example showing how to manage permissions for a GCP project with the SDK.
+//
+// The RSC service account key file, identifying the RSC account, should be
+// pointed out by the RUBRIK_POLARIS_SERVICEACCOUNT_FILE environment variable.
+func main() {
+	ctx := context.Background()
+
+	// Load configuration and create client.
+	polAccount, err := polaris.DefaultServiceAccount(true)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logger := polarislog.NewStandardLogger()
+	if err := polaris.SetLogLevelFromEnv(logger); err != nil {
+		log.Fatal(err)
+	}
+	client, err := polaris.NewClientWithLogger(polAccount, logger)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	gcpClient := gcp.Wrap(client)
+
+	// List GCP permissions needed for features.
+	features := []core.Feature{core.FeatureCloudNativeProtection, core.FeatureGCPSharedVPCHost}
+	perms, err := gcpClient.FeaturePermissions(ctx, features)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Permissions required for Cloud Native Protection:")
+	for _, featurePerms := range perms {
+		fmt.Printf(" Feature: %s\n", featurePerms.Feature)
+
+		fmt.Println("  Without conditions:")
+		for _, perm := range featurePerms.WithoutConditions {
+			fmt.Printf("   %s\n", perm)
+		}
+		fmt.Println("  With conditions:")
+		for _, perm := range featurePerms.WithConditions {
+			fmt.Printf("   %s\n", perm)
+		}
+		fmt.Println("  Conditions:")
+		for _, condition := range featurePerms.Conditions {
+			fmt.Printf("   %s\n", condition)
+		}
+	}
+
+	// Notify Polaris about updated permissions for the Cloud Native Protection
+	// feature of an already added project.
+	accounts, err := gcpClient.Projects(ctx, "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(accounts) == 0 {
+		log.Fatal("No project added")
+	}
+
+	err = gcpClient.PermissionsUpdated(ctx, accounts[0].ID, features)
+	if err != nil {
+		log.Fatal(err)
+	}
+}

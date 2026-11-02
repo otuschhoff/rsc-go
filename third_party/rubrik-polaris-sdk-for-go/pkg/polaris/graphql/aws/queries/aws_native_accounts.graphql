@@ -1,0 +1,42 @@
+query RubrikPolarisSDKRequest(
+    $after:                       String,
+    $awsNativeProtectionFeature:  AwsNativeProtectionFeature!,
+    $awsNativeProtectionFeatures: [AwsNativeProtectionFeature!],
+    $filter:                      String!,
+) {
+	awsNativeAccounts(
+	    after:                       $after,
+	    awsNativeProtectionFeature:  $awsNativeProtectionFeature,
+	    awsNativeProtectionFeatures: $awsNativeProtectionFeatures,
+	    accountFilters: {
+	    nameSubstringFilter: {
+	        nameSubstring: $filter
+	    }
+	}) {
+		count
+		edges {
+			node {
+				id
+				regionSpecs {
+					region
+					isExocomputeConfigured
+				}
+				status
+				name
+				slaAssignment
+				configuredSlaDomain {
+					id
+					name
+				}
+				effectiveSlaDomain {
+					id
+					name
+				}
+			}
+		}
+		pageInfo {
+			endCursor
+			hasNextPage
+		}
+	}
+}

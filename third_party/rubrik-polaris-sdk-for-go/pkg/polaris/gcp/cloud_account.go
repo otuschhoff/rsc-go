@@ -1,0 +1,445 @@
+// Copyright 2025 Rubrik, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to
+// deal in the Software without restriction, including without limitation the
+// rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+// sell copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+// Package gcp provides a high level interface to the GCP part of the RSC
+// platform.
+package gcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+
+	"github.com/google/uuid"
+	"golang.org/x/oauth2/google"
+
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/graphql"
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/graphql/core"
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/graphql/gcp"
+	"github.com/rubrikinc/rubrik-polaris-sdk-for-go/pkg/polaris/log"
+)
+
+// CloudAccount for Google Cloud Platform projects. If DefaultServiceAccount is
+// true the cloud account depends on the default service account.
+type CloudAccount struct {
+	ID                    uuid.UUID
+	NativeID              string
+	Name                  string
+	ProjectNumber         int64
+	OrganizationName      string
+	DefaultServiceAccount bool
+	Features              []Feature
+}
+
+// Feature returns the specified feature from the CloudAccount's features.
+func (c CloudAccount) Feature(feature core.Feature) (Feature, bool) {
+	for _, f := range c.Features {
+		if f.Feature.Equal(feature) {
+			return f, true
+		}
+	}
+
+	return Feature{}, false
+}
+
+// Feature for Google Cloud Platform projects.
+type Feature struct {
+	core.Feature
+	Status core.Status
+}
+
+// SupportedFeatures returns the features supported by GCP cloud accounts.
+func SupportedFeatures() []core.Feature {
+	return []core.Feature{
+		core.FeatureCloudNativeArchival,
+		core.FeatureCloudNativeProtection,
+		core.FeatureCloudSQLProtection,
+		core.FeatureExocompute,
+		core.FeatureGCPBigQueryProtection,
+		core.FeatureGCPBigQueryReservation,
+		core.FeatureGCPSharedVPCHost,
+		core.FeatureServerAndApps,
+	}
+}
+
+// ProjectByID returns the project with the specified RSC cloud account ID.
+func (a API) ProjectByID(ctx context.Context, cloudAccountID uuid.UUID) (CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	projects, err := a.Projects(ctx, "")
+	if err != nil {
+		return CloudAccount{}, err
+	}
+	for _, project := range projects {
+		if project.ID == cloudAccountID {
+			return project, nil
+		}
+	}
+
+	return CloudAccount{}, fmt.Errorf("project %q %w", cloudAccountID, graphql.ErrNotFound)
+}
+
+// ProjectByNativeID returns the project with the specified native ID.
+// For GCP cloud accounts the native ID is the project name.
+func (a API) ProjectByNativeID(ctx context.Context, nativeID string) (CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	projects, err := a.Projects(ctx, nativeID)
+	if err != nil {
+		return CloudAccount{}, err
+	}
+	for _, project := range projects {
+		if project.NativeID == nativeID {
+			return project, nil
+		}
+	}
+
+	return CloudAccount{}, fmt.Errorf("project %q %w", nativeID, graphql.ErrNotFound)
+}
+
+// ProjectByNativeCloudAccountID returns the project with the specified RSC
+// native cloud account ID.
+func (a API) ProjectByNativeCloudAccountID(ctx context.Context, nativeCloudAccountID uuid.UUID) (CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	native, err := a.NativeProjectByID(ctx, nativeCloudAccountID)
+	if err != nil {
+		return CloudAccount{}, err
+	}
+
+	return a.ProjectByID(ctx, native.CloudAccountID)
+}
+
+// ProjectByProjectNumber returns the project with the specified GCP project
+// number.
+func (a API) ProjectByProjectNumber(ctx context.Context, projectNumber int64) (CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	projects, err := a.Projects(ctx, strconv.FormatInt(projectNumber, 10))
+	if err != nil {
+		return CloudAccount{}, err
+	}
+	for _, project := range projects {
+		if project.ProjectNumber == projectNumber {
+			return project, nil
+		}
+	}
+
+	return CloudAccount{}, fmt.Errorf("project %d %w", projectNumber, graphql.ErrNotFound)
+}
+
+// ProjectByName returns the project with the specified name.
+func (a API) ProjectByName(ctx context.Context, name string) (CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	projects, err := a.Projects(ctx, name)
+	if err != nil {
+		return CloudAccount{}, err
+	}
+
+	for _, project := range projects {
+		if project.Name == name {
+			return project, nil
+		}
+	}
+
+	return CloudAccount{}, fmt.Errorf("project %q %w", name, graphql.ErrNotFound)
+
+}
+
+// Projects return all projects matching the specified filter. The filter can
+// be used to search for project ID, project name and project number.
+func (a API) Projects(ctx context.Context, filter string) ([]CloudAccount, error) {
+	a.log.Print(log.Trace)
+
+	rawProjects, err := gcp.Wrap(a.client).CloudAccountProjectsByFeature(ctx, core.FeatureAll, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get projects: %s", err)
+	}
+
+	// Look up the features and permission groups for all cloud accounts.
+	cloudAccountIDs := make([]uuid.UUID, 0, len(rawProjects))
+	for _, project := range rawProjects {
+		cloudAccountIDs = append(cloudAccountIDs, project.Account.ID)
+	}
+	accountFeatures, err := a.cloudAccountFeatures(ctx, cloudAccountIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Look up organization name for cloud accounts. Note that if the native
+	// project has been disabled we cannot read the organization name.
+	// This can happen when RemoveProject times out and gets re-run with the
+	// native project already disabled.
+	accounts := toProjects(rawProjects)
+	for i := range accounts {
+		if features, ok := accountFeatures[accounts[i].ID]; ok {
+			copyPermissionGroups(&accounts[i], features)
+		}
+
+		natives, err := gcp.Wrap(a.client).NativeProjects(ctx, strconv.FormatInt(accounts[i].ProjectNumber, 10))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get native projects: %s", err)
+		}
+		accounts[i].OrganizationName = "<DISABLED>"
+		for _, native := range natives {
+			if native.NativeID == accounts[i].NativeID {
+				accounts[i].OrganizationName = native.OrganizationName
+				break
+			}
+		}
+	}
+
+	return accounts, nil
+}
+
+// cloudAccountFeatures returns the features and permission groups for the
+// specified cloud accounts. The endpoint that reads a GCP cloud account does
+// currently not return the permission groups.
+func (a API) cloudAccountFeatures(ctx context.Context, cloudAccountIDs []uuid.UUID) (map[uuid.UUID][]core.Feature, error) {
+	accountPermissions, err := gcp.Wrap(a.client).AllLatestFeaturePermissionsForCloudAccounts(ctx, cloudAccountIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get permissions: %s", err)
+	}
+
+	accounts := make(map[uuid.UUID][]core.Feature)
+	for _, account := range accountPermissions {
+		features := make([]core.Feature, 0, len(account.FeaturePermissions))
+		for _, feature := range account.FeaturePermissions {
+			pgs := make([]core.PermissionGroup, 0, len(feature.PermissionGroupVersions))
+			for _, pg := range feature.PermissionGroupVersions {
+				pgs = append(pgs, core.PermissionGroup(pg.PermissionGroup))
+			}
+			features = append(features, core.Feature{Name: feature.Feature, PermissionGroups: pgs})
+		}
+
+		accounts[account.CloudAccountID] = features
+	}
+
+	return accounts, nil
+}
+
+// copyPermissionGroups copies the permission groups from the features to the
+// cloud account features.
+func copyPermissionGroups(cloudAccount *CloudAccount, features []core.Feature) {
+	for i := range cloudAccount.Features {
+		if feature, ok := core.LookupFeature(features, cloudAccount.Features[i].Feature); ok {
+			cloudAccount.Features[i].PermissionGroups = feature.PermissionGroups
+		}
+	}
+}
+
+// AddProject adds the specified project and features to RSC. Returns the RSC
+// cloud account ID of the project.
+// If name or organization isn't given as an option they are derived from
+// information in the cloud. The result can vary slightly depending on
+// permissions.
+func (a API) AddProject(ctx context.Context, project ProjectFunc, features []core.Feature, opts ...OptionFunc) (uuid.UUID, error) {
+	a.log.Print(log.Trace)
+
+	if project == nil {
+		return uuid.Nil, errors.New("project is not allowed to be nil")
+	}
+	config, err := project(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("failed to lookup project: %s", err)
+	}
+
+	var options options
+	for _, option := range opts {
+		if err := option(ctx, &options); err != nil {
+			return uuid.Nil, fmt.Errorf("failed to lookup option: %s", err)
+		}
+	}
+	if options.name != "" {
+		config.name = options.name
+	}
+	if options.orgName != "" {
+		config.orgName = options.orgName
+	}
+
+	var jwtConfig string
+	if config.creds != nil {
+		jwtConfig = string(config.creds.JSON)
+	}
+
+	cloudAccountID, err := gcp.Wrap(a.client).CloudAccountAddManualAuthProject(ctx, config.NativeID, config.name,
+		config.number, config.orgName, jwtConfig, features)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("failed to add project: %s", err)
+	}
+
+	return cloudAccountID, nil
+}
+
+// RemoveProject removes the features from the project with the specified RSC
+// cloud account ID. If deleteSnapshots is true and a cloud native protection
+// feature is being removed, the snapshots are deleted, otherwise they are kept.
+func (a API) RemoveProject(ctx context.Context, cloudAccountID uuid.UUID, features []core.Feature, deleteSnapshots bool) error {
+	a.log.Print(log.Trace)
+
+	account, err := a.ProjectByID(ctx, cloudAccountID)
+	if err != nil {
+		return fmt.Errorf("failed to lookup project: %s", err)
+	}
+	for _, feature := range features {
+		if _, ok := account.Feature(feature); !ok {
+			return fmt.Errorf("cannot remove feature not added: %s", feature)
+		}
+	}
+
+	jobs, err := gcp.Wrap(a.client).CloudAccountDeleteProjectV2(ctx, cloudAccountID, features, deleteSnapshots)
+	if err != nil {
+		return fmt.Errorf("failed to delete project: %s", err)
+	}
+
+	for _, job := range jobs {
+		feature := job.Feature
+		if err := core.Wrap(a.client).WaitForFeatureDisableTaskChain(ctx, job.ID, func(ctx context.Context) (bool, error) {
+			account, err := a.ProjectByID(ctx, cloudAccountID)
+			if errors.Is(err, graphql.ErrNotFound) {
+				return true, nil
+			}
+			if err != nil {
+				return false, err
+			}
+
+			if _, ok := account.Feature(feature); ok {
+				return false, nil
+			}
+			return true, nil
+		}); err != nil {
+			return fmt.Errorf("failed to wait for task chain %s: %s", job.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// ServiceAccount returns the default service account name. If no default
+// service account has been set an empty string is returned.
+func (a API) ServiceAccount(ctx context.Context) (string, error) {
+	a.log.Print(log.Trace)
+
+	account, err := gcp.Wrap(a.client).DefaultCredentialsServiceAccount(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get default service account: %s", err)
+	}
+
+	return account, nil
+}
+
+// SetServiceAccount sets the default service account. The service account set
+// will be used for projects added without a service account key. Note that it's
+// not possible to remove a service account once it has been set.
+//
+// The service account is identified by the client email of the service account
+// key. RSC uses the client email to reference the service account, e.g. in the
+// GCP onboarding Terraform template, and therefore requires it to be a valid
+// GCP service account email.
+//
+// Note that the options are ignored. The Name option used to override the
+// service account name, but RSC no longer accepts a name that differs from the
+// client email of the service account key. The parameter is kept to not break
+// existing callers.
+func (a API) SetServiceAccount(ctx context.Context, project ProjectFunc, _ ...OptionFunc) error {
+	a.log.Print(log.Trace)
+
+	if project == nil {
+		return errors.New("project is not allowed to be nil")
+	}
+	config, err := project(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to lookup project: %s", err)
+	}
+	if config.creds == nil {
+		return errors.New("project is missing credentials")
+	}
+
+	jwtConfig, err := google.JWTConfigFromJSON(config.creds.JSON)
+	if err != nil {
+		return fmt.Errorf("failed to read the service account key: %s", err)
+	}
+	if jwtConfig.Email == "" {
+		return errors.New("service account key is missing the client email")
+	}
+
+	err = gcp.Wrap(a.client).SetDefaultServiceAccount(ctx, jwtConfig.Email, string(config.creds.JSON))
+	if err != nil {
+		return fmt.Errorf("failed to set default service account: %s", err)
+	}
+
+	return nil
+}
+
+// SetProjectServiceAccount the service account for the specified project
+// with the specified cloud account ID.
+func (a API) SetProjectServiceAccount(ctx context.Context, cloudAccountID uuid.UUID, project ProjectFunc) error {
+	a.log.Print(log.Trace)
+
+	if project == nil {
+		return errors.New("project is not allowed to be nil")
+	}
+	config, err := project(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to lookup project: %s", err)
+	}
+	if config.creds == nil {
+		return errors.New("project is missing credentials")
+	}
+
+	err = gcp.Wrap(a.client).SetCloudAccountProperties(ctx, cloudAccountID, string(config.creds.JSON))
+	if err != nil {
+		return fmt.Errorf("failed to set project service account: %s", err)
+	}
+
+	return nil
+}
+
+func toProjects(projectsByFeature []gcp.CloudAccountWithFeature) []CloudAccount {
+	accountMap := make(map[uuid.UUID]*CloudAccount)
+
+	for _, projectByFeature := range projectsByFeature {
+		account, ok := accountMap[projectByFeature.Account.ID]
+		if !ok {
+			account = &CloudAccount{
+				ID:                    projectByFeature.Account.ID,
+				NativeID:              projectByFeature.Account.ProjectID,
+				Name:                  projectByFeature.Account.Name,
+				ProjectNumber:         projectByFeature.Account.ProjectNumber,
+				DefaultServiceAccount: projectByFeature.Account.UsesGlobalConfig,
+			}
+			accountMap[projectByFeature.Account.ID] = account
+		}
+
+		account.Features = append(account.Features, Feature{
+			Feature: core.Feature{Name: projectByFeature.Feature.Feature},
+			Status:  projectByFeature.Feature.Status,
+		})
+	}
+
+	accounts := make([]CloudAccount, 0, len(accountMap))
+	for _, account := range accountMap {
+		accounts = append(accounts, *account)
+	}
+
+	return accounts
+}

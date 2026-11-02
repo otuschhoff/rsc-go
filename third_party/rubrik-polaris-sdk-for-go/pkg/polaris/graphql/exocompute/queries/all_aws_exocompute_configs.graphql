@@ -1,0 +1,53 @@
+query RubrikPolarisSDKRequest($awsNativeAccountIdOrNamePrefix: String!) {
+    result: allAwsExocomputeConfigs(awsNativeAccountIdOrNamePrefix: $awsNativeAccountIdOrNamePrefix) {
+        awsCloudAccount {
+            cloudType
+            id
+            nativeId
+            message
+            accountName
+        }
+        mappedCloudAccounts {
+            id
+            name
+            nativeId
+        }
+        featureDetail {
+            feature
+            roleArn
+            stackArn
+            status
+            awsRegions
+        }
+        exocomputeConfigs {
+            configUuid
+            healthCheckStatus {
+                failureReason
+                lastUpdatedAt
+                status
+                taskchainId
+            }
+            region
+            message
+            ... on AwsRscManagedExocomputeConfig {
+                vpcId
+                clusterSecurityGroupId
+                nodeSecurityGroupId
+                subnet1 {
+                    availabilityZone
+                    podSubnetId
+                    subnetId
+                }
+                subnet2 {
+                    availabilityZone
+                    podSubnetId
+                    subnetId
+                }
+                areSecurityGroupsRscManaged
+                optionalConfig {
+                    eksClusterAccessType
+                }
+            }
+        }
+    }
+}

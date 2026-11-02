@@ -1,0 +1,3 @@
+mutation RubrikPolarisSDKRequest($cloudAccountId: UUID!, $awsAccountName: String) {
+  result: updateAwsCloudAccount(input: {cloudAccountId: $cloudAccountId, awsAccountName: $awsAccountName})
+}

@@ -1,0 +1,39 @@
+mutation RubrikPolarisSDKRequest(
+    $archivalSpecs:                   [ArchivalSpecInput!],
+    $backupLocationSpecs:             [BackupLocationSpecInput!],
+    $backupWindows:                   [BackupWindowInput!],
+    $description:                     String,
+    $firstFullBackupWindows:          [BackupWindowInput!],
+    $id:                              String!,
+    $isRetentionLockedSla:            Boolean,
+    $localRetentionLimit:             SlaDurationInput,
+    $name:                            String!,
+    $objectSpecificConfigsInput:      ObjectSpecificConfigsInput,
+    $objectTypes:                     [SlaObjectType!]!,
+    $replicationSpecsV2:              [ReplicationSpecV2Input!],
+    $retentionLockMode:               RetentionLockMode,
+    $shouldApplyToExistingSnapshots:  ShouldApplyToExistingSnapshots,
+    $shouldApplyToNonPolicySnapshots: ShouldApplyToNonPolicySnapshots,
+    $snapshotSchedule:                GlobalSnapshotScheduleInput!
+) {
+    result: updateGlobalSla(input: {
+        archivalSpecs:                   $archivalSpecs,
+        backupLocationSpecs:             $backupLocationSpecs,
+        backupWindows:                   $backupWindows,
+        description:                     $description,
+        firstFullBackupWindows:          $firstFullBackupWindows,
+        id:                              $id
+        isRetentionLockedSla:            $isRetentionLockedSla,
+        localRetentionLimit:             $localRetentionLimit,
+        name:                            $name,
+        objectSpecificConfigsInput:      $objectSpecificConfigsInput,
+        objectTypes:                     $objectTypes,
+        replicationSpecsV2:              $replicationSpecsV2,
+        retentionLockMode:               $retentionLockMode,
+        shouldApplyToExistingSnapshots:  $shouldApplyToExistingSnapshots
+        shouldApplyToNonPolicySnapshots: $shouldApplyToNonPolicySnapshots
+        snapshotSchedule:                $snapshotSchedule
+    }) {
+        id
+    }
+}

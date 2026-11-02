@@ -1,0 +1,42 @@
+mutation RubrikPolarisSDKRequest($cloudType: AwsCloudType!, $nativeId: String!, $accountName: String!, $features: [CloudAccountFeature!], $featuresWithPG: [FeatureWithPermissionsGroups!], $roleChainingAccountId: UUID, $serviceType: AwsCloudAccountServiceType) {
+    result: validateAndCreateAwsCloudAccount(input: {
+        action: CREATE,
+        awsChildAccounts: [{
+            accountName: $accountName,
+            nativeId:    $nativeId,
+            cloudType:   $cloudType,
+        }],
+        features: $features,
+        featuresWithPermissionsGroups: $featuresWithPG,
+        roleChainingAccountId: $roleChainingAccountId,
+        serviceType: $serviceType
+    }) {
+        initiateResponse {
+            cloudFormationUrl
+            externalId
+            awsIamPairId
+            featureVersions {
+                feature
+                permissionsGroupVersions {
+                    permissionsGroup
+                    version
+                }
+                version
+            }
+            stackName
+            templateUrl
+        }
+        validateResponse {
+            invalidAwsAccounts {
+                accountName
+                nativeId
+                message
+            }
+            invalidAwsAdminAccount {
+                accountName
+                nativeId
+                message
+            }
+        }
+    }
+}

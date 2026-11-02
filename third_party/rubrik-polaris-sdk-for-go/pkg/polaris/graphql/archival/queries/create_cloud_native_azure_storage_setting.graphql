@@ -1,0 +1,33 @@
+mutation RubrikPolarisSDKRequest(
+    $cloudAccountId:             UUID!,
+    $cloudNativeLocTemplateType: CloudNativeLocTemplateType!,
+    $cmkInfo:                    [AzureCmkInput!],
+    $containerName:              String!,
+    $name:                       String!,
+    $networkAccessType:          AzureStorageAccountNetworkAccess,
+    $redundancy:                 AzureRedundancy!,
+    $storageTier:                AzureStorageTier!,
+    $subscriptionNativeId:       String!
+    $storageAccountName:         String!,
+    $storageAccountRegion:       AzureRegion,
+    $storageAccountTags:         TagsInput,
+) {
+    result: createCloudNativeAzureStorageSetting(input: {
+        cloudAccountId:              $cloudAccountId,
+        cloudNativeLocTemplateType:  $cloudNativeLocTemplateType,
+        cmkInfo:                     $cmkInfo,
+        containerName:               $containerName,
+        name:                        $name,
+        networkAccessType:           $networkAccessType,
+        redundancy:                  $redundancy,
+        storageTier:                 $storageTier,
+        subscriptionNativeId:        $subscriptionNativeId
+        storageAccountName:          $storageAccountName,
+        storageAccountRegion:        $storageAccountRegion,
+        storageAccountTags:          $storageAccountTags,
+    }) {
+        targetMapping {
+            id
+        }
+    }
+}

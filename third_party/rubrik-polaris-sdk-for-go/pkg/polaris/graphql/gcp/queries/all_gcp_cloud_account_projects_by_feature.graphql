@@ -1,0 +1,17 @@
+query RubrikPolarisSDKRequest($feature: CloudAccountFeature!, $projectSearchText: String!) {
+    result: allGcpCloudAccountProjectsByFeature(feature: $feature, projectStatusFilters: [], projectSearchText: $projectSearchText) {
+        project {
+            id
+            name
+            projectId
+            projectNumber
+            roleId
+            usesGlobalConfig
+        }
+        featureDetail {
+            feature
+            roleId
+            status
+        }
+    }
+}

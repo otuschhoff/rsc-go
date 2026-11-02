@@ -1,0 +1,70 @@
+query RubrikPolarisSDKRequest($fid: UUID!, $workloadHierarchy: WorkloadLevelHierarchy) {
+    result: hierarchyObject(fid: $fid, workloadHierarchy: $workloadHierarchy) {
+        id
+        name
+        objectType
+        slaAssignment
+        ... on AwsNativeAccount {
+            status
+            awsFeatures: enabledFeatures {
+                featureName
+                status
+                lastRefreshedAt
+            }
+        }
+        ... on AzureNativeSubscription {
+            azureFeatures: enabledFeatures {
+                featureName
+                lastRefreshedAt
+                status
+            }
+        }
+        ... on AzureDevOpsProject {
+            orgId
+        }
+        ... on AzureDevOpsRepository {
+            orgId
+            projectId
+        }
+        ... on GithubRepository {
+            orgId
+        }
+        ... on AzureSqlManagedInstanceServer {
+            authType
+            azureResourceGroupDetails {
+                azureSubscriptionDetails {
+                    id
+                    name
+                    accountConnectionId
+                    tenantId
+                    cloudType
+                    status
+                    regionSpecs {
+                        region
+                    }
+                }
+            }
+        }
+        configuredSlaDomain {
+            ... on ClusterSlaDomain {
+                id
+                name
+            }
+            ... on GlobalSlaReply {
+                id
+                name
+            }
+        }
+        effectiveSlaDomain {
+            ... on ClusterSlaDomain {
+                id
+                name
+            }
+            ... on GlobalSlaReply {
+                id
+                name
+            }
+        }
+    }
+}
+

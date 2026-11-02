@@ -1,0 +1,99 @@
+query RubrikPolarisSDKRequest($after: String, $filter: [TargetFilterInput!]) {
+    result: targets(sortBy: NAME, sortOrder: ASC, after: $after, filter: $filter) {
+        nodes {
+            id
+            cluster {
+                id
+                name
+                status
+                version
+                state {
+                    connectedState
+                }
+            }
+            name
+            targetType
+            status
+            isActive
+            ... on RubrikManagedAwsTarget {
+                cloudAccount {
+                    cloudAccountId
+                }
+                syncStatus
+                syncFailureReason
+                bucket
+                region
+                storageClass
+                awsRetrievalTier
+                encryptionType
+                kmsMasterKeyId
+                computeSettings {
+                    subnetId
+                    securityGroupId
+                    vpcId
+                    proxySettings {
+                        portNumber
+                        protocol
+                        proxyServer
+                        username
+                    }
+                }
+                isConsolidationEnabled
+                proxySettings {
+                    portNumber
+                    protocol
+                    proxyServer
+                    username
+                }
+                bypassProxy
+                immutabilitySettings {
+                    lockDurationDays
+                    isObjectLockEnabled
+                }
+                s3Endpoint
+                kmsEndpoint
+            }
+            ... on RubrikManagedAzureTarget {
+                syncStatus
+                immutabilitySettings {
+                    lockDurationDays
+                }
+            }
+            ... on RubrikManagedGcpTarget {
+                syncStatus
+            }
+            ... on RubrikManagedNfsTarget {
+                syncStatus
+            }
+            ... on RubrikManagedS3CompatibleTarget {
+                syncStatus
+                immutabilitySetting {
+                    bucketLockDurationDays
+                }
+            }
+            ... on RubrikManagedRcsTarget {
+                immutabilityPeriodDays
+                syncStatus
+                tier
+            }
+            ... on RubrikManagedRcvAwsTarget {
+                tier
+            }
+            ... on CdmManagedAwsTarget {
+                storageClass
+                immutabilitySettings {
+                    lockDurationDays
+                }
+            }
+            ... on CdmManagedAzureTarget {
+                immutabilitySettings {
+                    lockDurationDays
+                }
+            }
+        }
+        pageInfo {
+            endCursor
+            hasNextPage
+        }
+    }
+}

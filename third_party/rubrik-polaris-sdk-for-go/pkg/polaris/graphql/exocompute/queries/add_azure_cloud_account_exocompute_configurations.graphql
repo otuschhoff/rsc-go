@@ -1,0 +1,16 @@
+mutation RubrikPolarisSDKRequest(
+    $cloudAccountId:              UUID!,
+    $azureExocomputeRegionConfig: AzureExocomputeAddConfigInputType!
+    $triggerHealthCheck:          Boolean,
+) {
+    result: addAzureCloudAccountExocomputeConfigurations(input: {
+        cloudAccountId:               $cloudAccountId,
+        azureExocomputeRegionConfigs: [$azureExocomputeRegionConfig],
+        triggerHealthCheck:           $triggerHealthCheck,
+    }) {
+        configs {
+            configUuid
+            message
+        }
+    }
+}

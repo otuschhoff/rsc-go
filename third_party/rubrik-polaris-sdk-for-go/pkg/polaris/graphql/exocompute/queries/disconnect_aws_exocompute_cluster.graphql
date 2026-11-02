@@ -1,0 +1,5 @@
+mutation RubrikPolarisSDKRequest($clusterId: UUID!) {
+    result: disconnectAwsExocomputeCluster(input: {
+        clusterId: $clusterId
+    })
+}

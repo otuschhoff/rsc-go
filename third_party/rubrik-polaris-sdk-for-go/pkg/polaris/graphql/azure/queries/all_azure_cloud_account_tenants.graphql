@@ -1,0 +1,36 @@
+query RubrikPolarisSDKRequest($feature: CloudAccountFeature!, $includeSubscriptionDetails: Boolean!) {
+    result: allAzureCloudAccountTenants(feature: $feature, includeSubscriptionDetails: $includeSubscriptionDetails) {
+        cloudType
+        azureCloudAccountTenantRubrikId
+        clientId
+        appName
+        domainName
+        entraIdGroupId
+        subscriptionCount
+        subscriptions {
+            id
+            name
+            nativeId
+            featureDetail {
+                feature
+                permissionsGroups
+                status
+                regions
+                resourceGroup {
+                    name
+                    nativeId
+                    region
+                    tags {
+                        key
+                        value
+                    }
+                }
+                userAssignedManagedIdentity {
+                    name
+                    nativeId
+                    principalId
+                }
+            }
+        }
+    }
+}
