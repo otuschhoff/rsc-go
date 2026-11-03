@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.1 - 2026-11-03
+
+- Bound node-stat reads to a one-minute deadline, 4 MiB per response,
+  100 clusters per page, and 4096-byte cursors without changing SDK authentication.
+- Add caller-selectable `MaxPages` (1-10) and `MaxSamples` (1-10000), with
+  bounded defaults and no partial results when a limit is exceeded.
+- Reject missing connections, nodes or pagination status and test response,
+  page and sample limits alongside existing node and inventory fixtures.
+
 ## v0.1.0 - 2026-11-03
 
 First tagged minor release, following the initial pseudo-version publications.

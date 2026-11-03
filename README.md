@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.1.1`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -111,6 +111,11 @@ stats, err := client.NodeStats(ctx, "lab*", rsc.NodeStatsOptions{
 Options accept a paired start/end range, `AVERAGE`, `MAX`, or `UNDEFINED`
 aggregation, and an optional `NodeID`. Zero options leave the range, aggregation,
 and node selection to the API defaults. Cluster results are paginated.
+`MaxPages` accepts 1-10 (default 10), and `MaxSamples` accepts 1-10000
+(default 10000), globally across cluster pages. Reads have a maximum one-minute
+deadline, one SDK attempt per page, 100 clusters per page, 4 MiB per response,
+and 4096 bytes per cursor. Incomplete envelopes or exceeded bounds return no
+partial result. Caller deadlines remain authoritative when shorter.
 
 Samples expose `CPUStat` (raw API CPU utilization; the public reference does not
 specify its scale), `UsedMemoryPercent` (RAM used, percent), read/write IOPS
@@ -148,7 +153,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.1.0
+require github.com/otuschhoff/rsc-go v0.1.1
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```

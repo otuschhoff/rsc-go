@@ -3,6 +3,7 @@ package rsc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,7 +16,11 @@ type NodeStatsOptions struct {
 	Aggregation     string
 	NodeID          string
 	IncludeExtended bool
+	MaxPages        int
+	MaxSamples      int
 }
+
+var ErrIncompleteNodeStats = errors.New("RSC node statistics are incomplete or exceed read bounds")
 
 type NodeStats struct {
 	ClusterID                     string `json:"clusterId"`
@@ -42,6 +47,26 @@ func (client *Client) NodeStats(ctx context.Context, filter string, options Node
 }
 
 func FetchNodeStatsForCluster(ctx context.Context, client *http.Client, endpoint, clusterName string, options NodeStatsOptions) ([]ClusterNodeStatsInfo, error) {
+	if ctx == nil || client == nil {
+		return nil, ErrIncompleteNodeStats
+	}
+	if options.MaxPages == 0 {
+		options.MaxPages = 10
+	}
+	if options.MaxSamples == 0 {
+		options.MaxSamples = 10000
+	}
+	if options.MaxPages < 1 || options.MaxPages > 10 || options.MaxSamples < 1 || options.MaxSamples > 10000 {
+		return nil, ErrIncompleteNodeStats
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	bound := *client
+	next := bound.Transport
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	bound.Transport = inventoryTransport{next: next}
 	if options.Start.IsZero() != options.End.IsZero() || (!options.Start.IsZero() && !options.Start.Before(options.End)) {
 		return nil, fmt.Errorf("RSC node statistics require both start and end, with start before end")
 	}
@@ -78,22 +103,31 @@ func FetchNodeStatsForCluster(ctx context.Context, client *http.Client, endpoint
 	}`, ClusterFilterArgument(clusterName), extended)
 	var result []ClusterNodeStatsInfo
 	seen := make(map[string]bool)
+	samples := 0
+	pages := 0
 	for {
-		body, _, err := request(ctx, client, endpoint, query, variables, nil, 1)
+		if pages >= options.MaxPages {
+			return nil, ErrIncompleteNodeStats
+		}
+		pages++
+		body, _, err := request(ctx, &bound, endpoint, query, variables, nil, 1)
 		if err != nil {
 			return nil, err
 		}
+		if len(body) > 4<<20 {
+			return nil, ErrIncompleteNodeStats
+		}
 		var response struct {
-			Data struct {
-				ClusterConnection struct {
-					Nodes []struct {
+			Data *struct {
+				ClusterConnection *struct {
+					Nodes *[]struct {
 						ID      string      `json:"id"`
 						Name    string      `json:"name"`
 						Samples []NodeStats `json:"clusterNodeStats"`
 					} `json:"nodes"`
-					PageInfo struct {
+					PageInfo *struct {
 						EndCursor   *string `json:"endCursor"`
-						HasNextPage bool    `json:"hasNextPage"`
+						HasNextPage *bool   `json:"hasNextPage"`
 					} `json:"pageInfo"`
 				} `json:"clusterConnection"`
 			} `json:"data"`
@@ -105,17 +139,27 @@ func FetchNodeStatsForCluster(ctx context.Context, client *http.Client, endpoint
 		if len(response.Errors) > 0 {
 			return nil, fmt.Errorf("RSC GraphQL error: %s", response.Errors[0].Message)
 		}
+		if response.Data == nil || response.Data.ClusterConnection == nil {
+			return nil, ErrIncompleteNodeStats
+		}
 		connection := response.Data.ClusterConnection
-		for _, cluster := range connection.Nodes {
+		if connection.Nodes == nil || len(*connection.Nodes) > 100 || connection.PageInfo == nil || connection.PageInfo.HasNextPage == nil {
+			return nil, ErrIncompleteNodeStats
+		}
+		for _, cluster := range *connection.Nodes {
+			if len(cluster.Samples) > options.MaxSamples-samples {
+				return nil, ErrIncompleteNodeStats
+			}
+			samples += len(cluster.Samples)
 			result = append(result, ClusterNodeStatsInfo{
 				ClusterID: strings.TrimSpace(cluster.ID), ClusterName: strings.TrimSpace(cluster.Name), Samples: cluster.Samples,
 			})
 		}
-		if !connection.PageInfo.HasNextPage {
+		if !*connection.PageInfo.HasNextPage {
 			break
 		}
 		cursor := connection.PageInfo.EndCursor
-		if cursor == nil || *cursor == "" || seen[*cursor] {
+		if cursor == nil || *cursor == "" || len(*cursor) > 4096 || seen[*cursor] {
 			return nil, fmt.Errorf("RSC node statistics pagination did not advance")
 		}
 		seen[*cursor] = true

@@ -82,10 +82,13 @@ func TestNodeStatsFailures(t *testing.T) {
 		want   string
 	}{
 		{name: "GraphQL", body: `{"errors":[{"message":"not authorized"}],"data":{"clusterConnection":{"nodes":[{"id":"partial"}]}}}`, want: "not authorized"},
-		{name: "no clusters", body: `{"data":{"clusterConnection":{"nodes":[]}}}`, want: "returned no clusters"},
+		{name: "no clusters", body: `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`, want: "returned no clusters"},
 		{name: "invalid JSON", body: `{`, want: "unexpected end of JSON input"},
-		{name: "missing cursor", body: `{"data":{"clusterConnection":{"pageInfo":{"hasNextPage":true}}}}`, want: "pagination did not advance"},
-		{name: "repeated cursor", body: `{"data":{"clusterConnection":{"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}`, want: "pagination did not advance"},
+		{name: "missing cursor", body: `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}`, want: "pagination did not advance"},
+		{name: "repeated cursor", body: `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}`, want: "pagination did not advance"},
+		{name: "missing nodes", body: `{"data":{"clusterConnection":{"pageInfo":{"hasNextPage":false}}}}`, want: "incomplete"},
+		{name: "missing page info", body: `{"data":{"clusterConnection":{"nodes":[]}}}`, want: "incomplete"},
+		{name: "missing next page", body: `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{}}}}`, want: "incomplete"},
 		{name: "HTTP failure", body: `{"message":"unavailable"}`, status: http.StatusServiceUnavailable, want: "503"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -139,6 +142,31 @@ func TestNodeStatsInvalidOptions(t *testing.T) {
 		if err == nil || stats != nil {
 			t.Fatalf("invalid options %+v returned %#v/%v", options, stats, err)
 		}
+	}
+}
+
+func TestNodeStatsReadBounds(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		body    string
+		options NodeStatsOptions
+	}{
+		{"pages", `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}`, NodeStatsOptions{MaxPages: 1}},
+		{"samples", `{"data":{"clusterConnection":{"nodes":[{"id":"cluster","clusterNodeStats":[{},{}]}],"pageInfo":{"hasNextPage":false}}}}`, NodeStatsOptions{MaxSamples: 1}},
+		{"body", `{"data":{"clusterConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}` + strings.Repeat(" ", 4<<20), NodeStatsOptions{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				requests++
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			rows, err := FetchNodeStatsForCluster(context.Background(), server.Client(), server.URL, "cluster", test.options)
+			if err == nil || rows != nil || requests != 1 {
+				t.Fatalf("bound result: rows=%d error=%v requests=%d", len(rows), err, requests)
+			}
+		})
 	}
 }
 
