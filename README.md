@@ -91,6 +91,27 @@ The library does not save files, create directories, discover CDOT objects,
 manage Git, or maintain a singleton/global cache. Per-request user-agent and
 logging hooks are available through `WithRequestOptions`.
 
+## NAS primary-fileset assignments
+
+`Client.NASFilesetSources` / `FetchNASFilesetSources` return paginated NAS
+shares with share and primary-fileset IDs, protocol, host, export path, cluster,
+and primary-fileset configured, effective and pending SLA references.
+Missing response fields, failed pages and nonadvancing/cyclic cursors return
+errors without partial results. The existing SLA retry policy applies.
+
+`Client.Assignments` / `FetchSLAAssignments` use primary-fileset configured or
+effective policy matches rather than parent-share or reporting associations.
+Explicit `DO_NOT_PROTECT`/`UNPROTECTED` and unknown effective state are preserved;
+configured membership does not imply protection. IDs take precedence over names.
+Pending SLA is exposed as metadata but does not alone establish membership or
+effective protection. NAS assignments use kind `NAS_FILESET` and normalize SMB
+to CIFS. Other assignment kinds remain unchanged.
+
+For exports across multiple policies, fetch the inventory once and pass it to
+`Client.AssignmentsWithNAS` / `FetchSLAAssignmentsWithNAS`. A non-nil empty slice
+means authoritative empty inventory; nil requests a fresh inventory. The caller
+owns its scope and lifetime; the library adds no cache.
+
 ## Cluster member load
 
 `Client.NodeStats(ctx, clusterFilter, options)` and

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add reusable NAS primary-fileset inventory with share/workload IDs and
+  configured, effective and pending SLA references.
+- Correct NAS SLA assignments to use primary-fileset configured/effective
+  matches, preserving explicit unprotection, unknown state and policy identity.
+- Allow a complete caller-owned inventory to be reused across SLA policies.
+- Reject incomplete NAS responses and stalled/cyclic pagination without partial
+  results; remove duplicate NAS reporting/template assignments.
+
 ## v0.1.1 - 2026-11-03
 
 - Bound node-stat reads to a one-minute deadline, 4 MiB per response,

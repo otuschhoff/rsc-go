@@ -182,10 +182,28 @@ func SLARetryableStatus(status int) bool {
 }
 
 func FetchSLAAssignments(ctx context.Context, client *http.Client, endpoint, slaID, slaName string) ([]SLAAssignment, error) {
+	sources, err := FetchNASFilesetSources(ctx, client, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return FetchSLAAssignmentsWithNAS(ctx, client, endpoint, slaID, slaName, sources)
+}
+
+// FetchSLAAssignmentsWithNAS uses primary-fileset configured/effective matches
+// for NAS assignments. sources must be a complete inventory from
+// FetchNASFilesetSources; nil fetches it rather than implying empty coverage.
+func FetchSLAAssignmentsWithNAS(ctx context.Context, client *http.Client, endpoint, slaID, slaName string, sources []NASFilesetSource) ([]SLAAssignment, error) {
+	if sources == nil {
+		var err error
+		sources, err = FetchNASFilesetSources(ctx, client, endpoint)
+		if err != nil {
+			return nil, err
+		}
+	}
 	const queryTemplate = `query OpsctlSLAAssignments { filesetTemplates(hostRoot: %s, first: 100, after: %s) { nodes { id name includes excludes osType shareType cluster { name } configuredSlaDomain { id name } effectiveSlaDomain { id name } descendantConnection { nodes { id name physicalPath { name fid } configuredSlaDomain { id name } effectiveSlaDomain { id name } cluster { name } } } } pageInfo { endCursor hasNextPage } } }`
 	var assignments []SLAAssignment
 	nasSources := make(map[string]NASSourceMatch)
-	for _, root := range []string{"WINDOWS_HOST_ROOT", "LINUX_HOST_ROOT", "NAS_HOST_ROOT"} {
+	for _, root := range []string{"WINDOWS_HOST_ROOT", "LINUX_HOST_ROOT"} {
 		var cursor string
 		for {
 			after := "null"
@@ -335,6 +353,10 @@ func FetchSLAAssignments(ctx context.Context, client *http.Client, endpoint, sla
 			return nil, err
 		}
 		for _, object := range response.Data.ProtectedObjects.Nodes {
+			kind := strings.ToUpper(object.ObjectType)
+			if kind == "NAS_FILESET" || kind == "NAS_HOST_ROOT" || strings.HasPrefix(kind, "NAS_SHARE/") {
+				continue
+			}
 			if object.IsArchived || object.IsUnprotected || object.EffectiveSLAID != slaID {
 				continue
 			}
@@ -357,102 +379,43 @@ func FetchSLAAssignments(ctx context.Context, client *http.Client, endpoint, sla
 		protectedCursor = response.Data.ProtectedObjects.PageInfo.EndCursor
 	}
 
-	const nasQueryTemplate = `query OpsctlSLANASShares { nasShares(first: 100, after: %s) { nodes { name id exportPoint hostAddress shareType nasSystem { name } primaryFileset { name } cluster { name } configuredSlaDomain { id name } effectiveSlaDomain { id name } } pageInfo { endCursor hasNextPage } } }`
-	var nasCursor string
-	for {
-		nasAfter := "null"
-		if nasCursor != "" {
-			nasAfterBytes, err := json.Marshal(nasCursor)
-			if err != nil {
-				return nil, fmt.Errorf("marshal RSC NAS cursor: %w", err)
-			}
-			nasAfter = string(nasAfterBytes)
+	for _, share := range sources {
+		source := NASSource{
+			Name:        strings.TrimSpace(share.Name),
+			HostAddress: strings.TrimSpace(share.HostAddress),
+			ExportPoint: strings.TrimSpace(share.ExportPoint),
+			ShareType:   strings.TrimSpace(share.ShareType),
 		}
-		query := fmt.Sprintf(nasQueryTemplate, nasAfter)
-		var nasResponse struct {
-			Data struct {
-				NASShares struct {
-					Nodes []struct {
-						Name        string `json:"name"`
-						ExportPoint string `json:"exportPoint"`
-						HostAddress string `json:"hostAddress"`
-						ShareType   string `json:"shareType"`
-						NASSystem   struct {
-							Name string `json:"name"`
-						} `json:"nasSystem"`
-						PrimaryFileset struct {
-							Name string `json:"name"`
-						} `json:"primaryFileset"`
-						Cluster struct {
-							Name string `json:"name"`
-						} `json:"cluster"`
-						EffectiveSLA struct {
-							ID   string `json:"id"`
-							Name string `json:"name"`
-						} `json:"effectiveSlaDomain"`
-						ConfiguredSLA struct {
-							ID   string `json:"id"`
-							Name string `json:"name"`
-						} `json:"configuredSlaDomain"`
-					} `json:"nodes"`
-					PageInfo struct {
-						EndCursor   string `json:"endCursor"`
-						HasNextPage bool   `json:"hasNextPage"`
-					} `json:"pageInfo"`
-				} `json:"nasShares"`
-			} `json:"data"`
+		AddNASSource(nasSources, source)
+		fileset := share.PrimaryFileset
+		if fileset == nil {
+			continue
 		}
-		if err := ExecuteSLAGraphQL(ctx, client, endpoint, query, &nasResponse); err != nil {
-			if IsNotFoundError(err) {
-				logf(ctx, 2, "rsc sla: NAS shares unavailable: %v", err)
-				break
-			}
-			return nil, err
+		if primaryFileset := strings.TrimSpace(fileset.Name); primaryFileset != "" {
+			AddNASSourceKeys(nasSources, source, NASSourceKeys(primaryFileset))
 		}
-		for _, share := range nasResponse.Data.NASShares.Nodes {
-			source := NASSource{
-				Name:        strings.TrimSpace(share.Name),
-				HostAddress: strings.TrimSpace(share.HostAddress),
-				ExportPoint: strings.TrimSpace(share.ExportPoint),
-				ShareType:   strings.TrimSpace(share.ShareType),
-			}
-			AddNASSource(nasSources, source)
-			if primaryFileset := strings.TrimSpace(share.PrimaryFileset.Name); primaryFileset != "" {
-				AddNASSourceKeys(nasSources, source, NASSourceKeys(primaryFileset))
-			}
-			sla := share.EffectiveSLA
-			if share.ConfiguredSLA.ID == slaID {
-				sla = share.ConfiguredSLA
-			}
-			if !MatchesSLAReference(sla.ID, sla.Name, slaID, slaName) {
-				continue
-			}
-			path := strings.TrimSpace(share.ExportPoint)
-			if path == "" {
-				path = strings.TrimSpace(share.HostAddress)
-			}
-			template := strings.TrimSpace(share.PrimaryFileset.Name)
-			if template == "" {
-				template = strings.TrimSpace(share.NASSystem.Name)
-			}
-			assignments = append(assignments, SLAAssignment{
-				Kind:              "NAS_SHARE/" + strings.TrimSpace(share.ShareType),
-				Template:          template,
-				Instance:          strings.TrimSpace(share.Name),
-				Path:              path,
-				Host:              strings.TrimSpace(share.HostAddress),
-				ShareType:         strings.TrimSpace(share.ShareType),
-				Cluster:           strings.TrimSpace(share.Cluster.Name),
-				SLAID:             strings.TrimSpace(sla.ID),
-				SLAName:           strings.TrimSpace(sla.Name),
-				ConfiguredSLAName: strings.TrimSpace(share.ConfiguredSLA.Name),
-				EffectiveSLAName:  strings.TrimSpace(sla.Name),
-			})
+		if !nasFilesetSLAMatches(fileset.ConfiguredSLA, slaID, slaName) && !nasFilesetSLAMatches(fileset.EffectiveSLA, slaID, slaName) {
+			continue
 		}
-		if !nasResponse.Data.NASShares.PageInfo.HasNextPage || nasResponse.Data.NASShares.PageInfo.EndCursor == "" {
-			break
+		protocol := strings.ToUpper(strings.TrimSpace(share.ShareType))
+		if protocol == "SMB" {
+			protocol = "CIFS"
 		}
-		nasCursor = nasResponse.Data.NASShares.PageInfo.EndCursor
+		effective := nasFilesetSLAName(fileset.EffectiveSLA, slaID, slaName)
+		assignments = append(assignments, SLAAssignment{
+			Kind:              "NAS_FILESET",
+			Template:          strings.TrimSpace(fileset.Name),
+			Instance:          strings.TrimSpace(share.Name),
+			Path:              strings.TrimSpace(share.ExportPoint),
+			Host:              strings.TrimSpace(share.HostAddress),
+			TargetHost:        strings.TrimSpace(share.HostAddress),
+			ShareType:         protocol,
+			Cluster:           strings.TrimSpace(share.Cluster.Name),
+			SLAID:             strings.TrimSpace(fileset.EffectiveSLA.ID),
+			SLAName:           effective,
+			ConfiguredSLAName: nasFilesetSLAName(fileset.ConfiguredSLA, slaID, slaName),
+			EffectiveSLAName:  effective,
+		})
 	}
 
 	const nasObjectQuery = `query OpsctlSLANASObjects { nasSystems(first: 100) { nodes { name id vendorType shareCount namespaceCount cluster { name } effectiveSlaDomain { id name } } } nasNamespaces(first: 100) { nodes { name id vendorType cluster { name } effectiveSlaDomain { id name } } } }`

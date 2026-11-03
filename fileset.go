@@ -28,6 +28,9 @@ func FetchFilesetsForSLA(ctx context.Context, client *http.Client, endpoint, fil
 			return nil, err
 		}
 		for index := range policyAssignments {
+			if policyAssignments[index].Kind == "NAS_FILESET" {
+				continue
+			}
 			if strings.TrimSpace(policyAssignments[index].ConfiguredSLAName) == "" {
 				policyAssignments[index].ConfiguredSLAName = policy.Name
 			}

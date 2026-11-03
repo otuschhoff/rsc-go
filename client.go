@@ -149,6 +149,15 @@ func (client *Client) Assignments(ctx context.Context, slaID, slaName string) ([
 	return FetchSLAAssignments(ctx, client.httpClient, client.endpoint, slaID, slaName)
 }
 
+// AssignmentsWithNAS reuses a caller-owned, complete NAS inventory across policies.
+func (client *Client) AssignmentsWithNAS(ctx context.Context, slaID, slaName string, sources []NASFilesetSource) ([]SLAAssignment, error) {
+	return FetchSLAAssignmentsWithNAS(ctx, client.httpClient, client.endpoint, slaID, slaName, sources)
+}
+
+func (client *Client) NASFilesetSources(ctx context.Context) ([]NASFilesetSource, error) {
+	return FetchNASFilesetSources(ctx, client.httpClient, client.endpoint)
+}
+
 func (client *Client) Filesets(ctx context.Context) ([]SLAAssignment, error) {
 	return FetchFilesets(ctx, client.httpClient, client.endpoint)
 }
