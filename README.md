@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.2.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.3.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -223,6 +223,185 @@ Schema contracts: [takeOnDemandSnapshot](https://developer.rubrik.com/Rubrik-Sec
 [cancelActivitySeries](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/mutations/cancelActivitySeries/),
 and [cancelTaskchain](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/mutations/cancelTaskchain/).
 
+## Backup activity monitoring
+
+`Client.ReadBackupActivityObservations` / `ReadBackupActivityObservations` add
+bounded, presence-aware monitoring reads without changing `BackupActivities`,
+`BackupJobs`, snapshot enrichment, or their legacy behavior. This API returns
+**activity-series observations, not verified backup executions**.
+`BackupActivitySourceCapabilities()` explicitly reports the unsupported
+execution identity, whole-run status, completion, cumulative-counter, duration,
+and atomic-enumeration capabilities. No live probes were used.
+
+```go
+end := time.Now().UTC()
+read, err := client.ReadBackupActivityObservations(ctx, rsc.BackupActivityReadOptions{
+        Scope: rsc.BackupActivityScope{
+                WorkloadIDs: []string{workloadID},
+                ClusterIDs:  []string{clusterID},
+        },
+        Window: rsc.BackupActivityWindow{
+                Start: end.Add(-time.Hour),
+                End:   end,
+                Field: rsc.BackupActivityUpdatedTime,
+        },
+        Statuses: []string{"RUNNING", "QUEUED", "CANCELING"},
+        Limits: rsc.BackupActivityReadLimits{
+                PageSize: 100, MaxPages: 10, MaxResults: 1000,
+                MaxDuration: 30 * time.Second,
+        },
+})
+```
+
+Scope requires 1-100 exact workload UUIDs and/or 1-100 exact cluster UUIDs; when
+both are supplied they intersect. Returned identities are validated against
+that scope and canonicalized to lowercase. `WorkloadID()` is the source `fid`,
+suitable for joining the immutable IDs in bounded SLA/source inventories.
+It is not the display name or the CDM `objectId`. `ActivitySeriesID()` is only
+a series UUID; it is not relabeled as an execution, snapshot, or child-task ID.
+
+Windows require explicit increasing UTC bounds and select either
+`BackupActivityUpdatedTime` (`lastUpdatedTimeGt`/`lastUpdatedTimeLt`) or
+`BackupActivityStartTime` (`startTimeGt`/`startTimeLt`). Source bounds are
+**exclusive at both ends**, not a half-open interval. The selected timestamp
+must be known and strictly inside the window; other timestamps may be null.
+Omit `Statuses` for update/history reads that also retain unknown statuses.
+Filters use exact `EventStatus` values: `SUCCESS`, `FAILURE`, `CANCELED`, and
+`PARTIAL_SUCCESS` select latest-activity outcomes, not authoritative terminal
+backup runs. `TASK_SUCCESS`/`TASK_FAILURE` are not normalized into run success
+or failure. Returned `LastActivityStatus()` always preserves the raw value.
+
+All limits are explicit: 1-100 entries/page, 1-100 total pages, 1-10000 total
+results, and an overall duration greater than zero and at most one minute.
+Each page has a 4 MiB response cap and 4096-byte cursor cap and uses one SDK
+attempt through the authorized HTTP client. Shorter caller deadlines win.
+Missing selected fields, malformed values, invalid/out-of-scope identities,
+duplicate series, cyclic/stalled cursors, page failures, and exceeded limits
+fail closed. A duplicate, even an identical one, is a failed read rather than
+silently deduplicated mutable pagination.
+
+Only `err == nil && read.Complete` supplies observations; successful empty
+slices are non-nil. Failed reads return nil observations and `Complete == false`
+with window/scope, collected-page/result counts, and collection times for
+diagnostics. `Continuation` is diagnostic only, not a safe resume token or a
+consumer checkpoint. Never advance a checkpoint on failure. `Atomic` is always
+false: draining a mutable connection proves neither an atomic point-in-time
+view nor that changes during the traversal were all seen. Narrow/repeat windows
+and allow overlap; a drained start-time window is not historical event retention.
+
+Observations have private value fields and value-returning getters. Null numeric
+and time values return `known == false`; genuine zero remains known. Previously
+returned observations cannot be changed by later reads or mutated option slices.
+Extract getters into consumer-owned persistence records, retaining their known
+flags; default JSON marshaling of an observation produces `{}`, not source data.
+`RevisionFingerprint()` hashes the selected canonical source values, including
+nullable presence and retry metadata, but excludes local `CollectedAt()`. It is
+a content revision for replay, not an execution ID, ordered source version, or
+guarantee that the source retained every intermediate update.
+
+### Verified source meanings
+
+The public schema and local SDK fixtures were checked on 2026-11-03:
+
+| Source field | Meaning and limit |
+| --- | --- |
+| `startTime` | Series start, nullable; not a transfer-phase boundary. |
+| `lastUpdated` | Series update time; **not completion**. |
+| `lastEventAddedAt` | Most recent event-added time; not completion. |
+| `lastVerifiedAt` | Most recent verification time; not completion. |
+| `CollectedAt()` | Local UTC collection receipt, not source freshness. |
+| `dataTransferred` | Nullable event-associated bytes. Cumulative vs incremental vs final-only, compression, and physical/logical semantics are unspecified. |
+| `logicalSize` | Separate nullable logical-size bytes, not transferred bytes. |
+| `attemptNumber` | Nullable related-job attempt metadata; retry grouping and series reuse are unspecified. |
+
+No completion or duration is derived from series updates, counters, status,
+message text, names, or an absent row. Counter decreases, retry changes, late
+updates, and cancellation remain observable source revisions; they are not
+interpreted as a counter reset, a new execution, an abort, or a completion.
+The legacy enrichment duration `LastUpdated - StartTime` is not a verified
+monitoring duration. There are no verified transfer-phase boundaries or duration
+in these selections, so transfer duration/rate and physical-byte deltas are not
+exposed. Without a verified execution identity and cumulative-counter contract,
+do not turn `dataTransferred` observations into traffic totals or rates.
+
+### Known job-instance taskchains
+
+`Client.ReadKnownBackupTaskchains` / `ReadKnownBackupTaskchains` read explicit
+caller-known taskchain UUIDs. `TaskchainIDs`, `MaxRequests` (1-100), and
+`MaxDuration` (greater than zero, at most one minute) are required; all requested
+IDs must fit the request budget. The same SDK path and 4 MiB response cap apply,
+with one attempt per ID and no partial batches. `Complete` concerns that supplied
+ID set only, and `Atomic` remains false. This is lookup, not execution discovery.
+
+```go
+taskchains, err := client.ReadKnownBackupTaskchains(ctx, rsc.BackupTaskchainReadOptions{
+        TaskchainIDs: []string{taskchainID},
+        MaxRequests:  1,
+        MaxDuration:  10 * time.Second,
+})
+```
+
+The `taskchain` schema provides job-instance UUID, state, nullable start/end,
+last progress time, parent ID, raw job type, and current **task** execution
+attempts. `Terminal()` recognizes `SUCCEEDED`, `FAILED`, and `CANCELED`; `READY`
+(waiting), `RUNNING`, `CANCELING`, and `UNDOING` are nonterminal. `UNKNOWN` and
+future values remain raw and return unknown terminal classification. Cancellation
+is not renamed "aborted" or assumed instantaneous. `ElapsedDuration()` returns
+end minus start only for a known terminal state with known ordered boundaries
+and representable duration, including a genuine zero. It is taskchain elapsed
+time, not transfer-phase time, queued time, or necessarily a backup's duration.
+
+The initiation reply documents a workload UUID/job-instance taskchain UUID pair;
+retain that source binding from `StartBackupResult`. Do not invent bindings for
+scheduled backups. The lookup does not establish workload/cluster identity,
+backup workflow classification, or parent/root semantics. A child taskchain's
+state is authoritative only for that child. The public activity selections do
+not expose a verified link to job-instance taskchains or enumerate all scheduled
+executions. Task-internal attempts do not create a new instance while the source
+UUID stays the same; whether a whole-backup retry reuses or replaces that UUID
+remains unverified. No fallback to `getKorgTaskchainStatus`, CDM, or parsed opaque
+activity metadata is attempted.
+
+### Consumer integration contract
+
+- Reconcile active **candidates** using exact scope and bounded windows. Old/stale
+    runs may fall outside a window, and mutable pagination may omit a revision.
+    Missing candidates never imply completion or abort. Retain independently
+    known instance IDs and reconcile them through their authoritative source.
+- Record collection receipt separately from source update/verification times.
+    A fresh poll is not a fresh source observation; null means unknown.
+- Keep overlapping update windows and deduplicate series revisions by source
+    series UUID plus fingerprint. Handle late corrections without treating them
+    as new executions. Source update time is not a completion timestamp or proof
+    of a monotonically increasing revision sequence.
+- For independently bound job-instance taskchains, store terminal history by
+    instance UUID, updating revisions/duration rather than counting each terminal
+    poll. Do not aggregate unrelated series/children into a run or deduplicate
+    concurrent runs by workload UUID. Missing/denied lookups are not terminal.
+- Cumulative-counter deltas require verified counter mode, the same execution
+    and attempt, ordered source observations, and non-null nondecreasing values.
+    A decrease or attempt change invalidates the baseline; never take absolute
+    differences or treat null as zero. This source's counter mode is unverified,
+    so retain raw values without emitting cumulative deltas yet.
+
+Polling, persistence, deduplication checkpoints, Influx encoding, and dashboards
+remain consumer-owned. `BackupMonitoringError` exposes sanitized error text and
+typed invalid-option/incomplete/limit/request/HTTP-denied codes while preserving
+`errors.Is` cancellation, deadlines, and authority identity. Do not log unwrapped
+SDK errors, which may include source content. HTTP 401/403 are classified as
+denied; a GraphQL error in HTTP 200 remains a generic request failure unless a
+documented structured denial contract is available, never classified from text.
+Full scheduled-execution monitoring and verified byte-rate/transfer-duration
+metrics remain blocked by source semantics, not filled with guessed values.
+
+References: [ActivitySeries](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/ActivitySeries/),
+[ActivitySeriesFilter](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/inputs/ActivitySeriesFilter/),
+[ActivityStatusEnum](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/ActivityStatusEnum/),
+[EventStatus](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/EventStatus/),
+[Taskchain](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/Taskchain/),
+[TaskchainState](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/TaskchainState/),
+and [TakeOnDemandSnapshotTaskchainUuid](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/TakeOnDemandSnapshotTaskchainUuid/).
+
 ## Cluster member load
 
 `Client.NodeStats(ctx, clusterFilter, options)` and
@@ -285,7 +464,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.2.0
+require github.com/otuschhoff/rsc-go v0.3.0
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```

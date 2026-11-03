@@ -11,6 +11,109 @@ import (
 	"time"
 )
 
+func TestKnownBackupTaskchainObservations(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000010"
+	for _, state := range []string{"READY", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "CANCELING", "UNDOING", "UNKNOWN", "FUTURE_STATE"} {
+		t.Run(state, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"taskchain": map[string]any{
+					"taskchainUuid": id, "state": state, "parentTaskchainId": "", "jobType": "source-job-type", "startTime": "2026-11-03T10:00:00Z", "endTime": "2026-11-03T10:05:00Z", "progressedAt": nil, "currentTaskExecutionAttempts": 2}}})
+			}))
+			defer server.Close()
+			read, err := ReadKnownBackupTaskchains(context.Background(), server.Client(), server.URL, BackupTaskchainReadOptions{TaskchainIDs: []string{id}, MaxRequests: 1, MaxDuration: time.Second})
+			if err != nil || !read.Complete || read.Atomic || len(read.Observations) != 1 {
+				t.Fatalf("taskchain read: %v", err)
+			}
+			observation := read.Observations[0]
+			terminal := state == "SUCCEEDED" || state == "FAILED" || state == "CANCELED"
+			unknown := state == "UNKNOWN" || state == "FUTURE_STATE"
+			if actual, known := observation.Terminal(); actual != terminal || known == unknown {
+				t.Fatal("incorrect taskchain state mapping")
+			}
+			if duration, known := observation.ElapsedDuration(); known != terminal || (known && duration != 5*time.Minute) {
+				t.Fatal("incorrect taskchain elapsed duration")
+			}
+			if attempts, known := observation.CurrentTaskExecutionAttempts(); !known || attempts != 2 || observation.TaskchainID() != id || observation.State() != state {
+				t.Fatal("taskchain source identity lost")
+			}
+			if _, known := observation.ProgressedAt(); known {
+				t.Fatal("progress time fabricated")
+			}
+		})
+	}
+}
+
+func TestBackupActivityMonitoringObservations(t *testing.T) {
+	const workload = "00000000-0000-4000-8000-000000000001"
+	const cluster = "00000000-0000-4000-8000-000000000002"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		filters := payload.Variables["filters"].(map[string]any)
+		if filters["lastUpdatedTimeGt"] != "2026-11-03T10:00:00Z" || filters["lastUpdatedTimeLt"] != "2026-11-03T11:00:00Z" ||
+			filters["objectFid"].([]any)[0] != workload || filters["clusterId"].([]any)[0] != cluster {
+			t.Errorf("unexpected source filters")
+		}
+		status, series, transferred := "Running", "00000000-0000-4000-8000-000000000003", any(nil)
+		if payload.Variables["after"] != nil {
+			status, series, transferred = "Queued", "00000000-0000-4000-8000-000000000004", 0
+		}
+		row := map[string]any{"activitySeriesId": series, "fid": workload, "clusterUuid": cluster, "lastActivityType": "Backup", "lastActivityStatus": status,
+			"startTime": nil, "lastUpdated": "2026-11-03T10:30:00Z", "lastEventAddedAt": nil, "lastVerifiedAt": nil, "dataTransferred": transferred, "logicalSize": 1024, "attemptNumber": nil, "isPolarisEventSeries": false}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"activitySeriesConnection": map[string]any{"nodes": []any{row}, "pageInfo": map[string]any{"hasNextPage": status == "Running", "endCursor": "next"}}}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	options := BackupActivityReadOptions{Scope: BackupActivityScope{WorkloadIDs: []string{workload}, ClusterIDs: []string{cluster}},
+		Window: BackupActivityWindow{Start: start, End: start.Add(time.Hour), Field: BackupActivityUpdatedTime}, Limits: BackupActivityReadLimits{PageSize: 1, MaxPages: 2, MaxResults: 2, MaxDuration: time.Second}}
+	read, err := client.ReadBackupActivityObservations(context.Background(), options)
+	if err != nil || !read.Complete || read.Atomic || len(read.Observations) != 2 || requests != 2 {
+		t.Fatalf("monitoring read incomplete: %v", err)
+	}
+	running, queued := read.Observations[0], read.Observations[1]
+	if running.ActivitySeriesID() == queued.ActivitySeriesID() || running.WorkloadID() != queued.WorkloadID() || running.LastActivityStatus() != "Running" || queued.LastActivityStatus() != "Queued" {
+		t.Fatal("source identity/status lost")
+	}
+	if _, known := running.DataTransferred(); known {
+		t.Fatal("null transferred bytes became zero")
+	}
+	if value, known := queued.DataTransferred(); !known || value != 0 {
+		t.Fatal("real zero bytes became unknown")
+	}
+	if _, known := queued.StartTime(); known {
+		t.Fatal("queued start time fabricated")
+	}
+	if value, known := running.LogicalSize(); !known || value != 1024 {
+		t.Fatal("logical bytes lost")
+	}
+	fingerprint := running.RevisionFingerprint()
+	replay, err := client.ReadBackupActivityObservations(context.Background(), options)
+	if err != nil || replay.Observations[0].RevisionFingerprint() != fingerprint || !replay.Observations[0].CollectedAt().After(running.CollectedAt()) {
+		t.Fatal("poll receipt changed source revision")
+	}
+	options.Scope.WorkloadIDs[0] = cluster
+	if running.WorkloadID() != workload || read.Scope.WorkloadIDs[0] != workload {
+		t.Fatal("caller options mutated observations")
+	}
+	capabilities := BackupActivitySourceCapabilities()
+	if capabilities.ExecutionIdentity || capabilities.WholeRunStatus || capabilities.CompletionTime || capabilities.CumulativeByteCounter || capabilities.JobDuration || capabilities.TransferPhaseDuration {
+		t.Fatal("unsupported execution semantics advertised")
+	}
+}
+
 func TestWorkloadSnapshotsPagination(t *testing.T) {
 	for _, scenario := range []string{"valid", "empty", "missing connection", "missing status", "missing cursor", "repeated cursor"} {
 		t.Run(scenario, func(t *testing.T) {

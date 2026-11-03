@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.0 - 2026-11-03
+
+- Add bounded, exact workload/cluster-scoped backup activity observations using
+  explicit UTC start/update windows and one SDK attempt per page. Reject
+  incomplete/duplicate/out-of-scope results, cursor cycles, and exceeded bounds
+  without silent truncation or partial observations.
+- Preserve nullable source times, event-associated transferred bytes, logical
+  bytes, raw latest-activity states, and related-job attempt metadata in immutable
+  observations with replay fingerprints and explicit collection/completeness data.
+- Add bounded lookup of caller-known job-instance taskchain UUIDs with documented
+  terminal-state mapping, nullable start/end boundaries, and valid terminal
+  taskchain elapsed duration; no inferred workload association or discovery.
+- Add sanitized monitoring errors preserving cancellation/deadline/authority
+  identity, and fixture coverage for source states/windows, retries/reset-like
+  changes, late revisions, response/read bounds, paging, denied access, and replay.
+- Document unsupported scheduled-execution identity/join, whole-run series
+  status/completion, counter mode/compression, retry grouping, and transfer-phase
+  duration. Legacy APIs/enrichment are unchanged and are not upgraded into
+  authoritative execution history; polling/persistence remain consumer-owned.
+
 ## v0.2.0 - 2026-11-03
 
 - Select CDM snapshot local, archival, and replication locations; retain location
