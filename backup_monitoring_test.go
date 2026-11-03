@@ -17,6 +17,410 @@ const monitoringFixtureCluster = "00000000-0000-4000-8000-000000000002"
 const monitoringFixtureSeries = "00000000-0000-4000-8000-000000000003"
 const monitoringFixtureTaskchain = "00000000-0000-4000-8000-000000000010"
 
+func monitoringTaskReportFixtureOptions() BackupTaskReportReadOptions {
+	baseline := monitoringFixtureOptions()
+	return BackupTaskReportReadOptions{Scope: baseline.Scope, Start: baseline.Window.Start, End: baseline.Window.End,
+		Statuses: []string{"fixture-terminal"}, TaskTypes: []string{"fixture-backup"}, Limits: baseline.Limits}
+}
+
+func monitoringTaskReportFixtureRow() map[string]any {
+	return map[string]any{"id": 1, "reportJobInstanceId": "opaque-report-column", "objectFid": monitoringFixtureWorkload,
+		"clusterUuid": monitoringFixtureCluster, "taskCategory": "Protection", "taskType": "fixture-backup", "status": "fixture-terminal",
+		"startTime": "2026-11-03T10:10:00Z", "endTime": "2026-11-03T10:30:00Z", "duration": 123,
+		"dataTransferred": 100, "logicalBytes": 1000, "physicalBytes": nil}
+}
+
+func monitoringTaskReportFixtureConnection(rows []any, more bool, cursor any) map[string]any {
+	return map[string]any{"data": map[string]any{"taskDetailConnection": map[string]any{
+		"nodes": rows, "pageInfo": map[string]any{"hasNextPage": more, "endCursor": cursor}}}}
+}
+
+func TestProtectionTaskReportsFailures(t *testing.T) {
+	for _, scenario := range []string{"empty", "missing connection", "missing nodes", "missing page info", "missing page status", "null row",
+		"wrong cluster", "invalid workload", "wrong category", "wrong type", "wrong status", "missing bytes", "invalid bytes", "missing row ID",
+		"null end", "missing end", "lower boundary", "upper boundary", "invalid UTC", "duplicate", "changed duplicate", "changed duplicate pages", "long report ID",
+		"missing cursor", "long cursor", "cyclic cursor", "page limit", "result limit", "filtered result limit", "page size", "oversize", "malformed", "denied", "GraphQL", "transport", "canceled", "deadline"} {
+		t.Run(scenario, func(t *testing.T) {
+			options := monitoringTaskReportFixtureOptions()
+			ctx := t.Context()
+			if scenario == "page limit" {
+				options.Limits.MaxPages = 1
+			}
+			if scenario == "result limit" || scenario == "filtered result limit" {
+				options.Limits.MaxResults = 1
+			}
+			if scenario == "page size" {
+				options.Limits.PageSize = 1
+			}
+			if scenario == "deadline" {
+				options.Limits.MaxDuration = time.Millisecond
+			}
+			if scenario == "canceled" {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = canceled
+			}
+			requests := 0
+			authorityErr := errors.New("private-task-report-fixture")
+			client := &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
+				requests++
+				if scenario == "transport" {
+					return nil, authorityErr
+				}
+				if scenario == "deadline" {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}
+				row := monitoringTaskReportFixtureRow()
+				rows := []any{row}
+				more, cursor := false, any(nil)
+				switch scenario {
+				case "empty":
+					rows = []any{}
+				case "null row":
+					rows = []any{nil}
+				case "wrong cluster":
+					row["clusterUuid"] = monitoringFixtureSeries
+				case "invalid workload":
+					row["objectFid"] = "private-not-a-uuid"
+				case "wrong category":
+					row["taskCategory"] = "Recovery"
+				case "wrong type":
+					row["taskType"] = "fixture-replication"
+				case "wrong status":
+					row["status"] = "unexpected"
+				case "missing bytes":
+					delete(row, "dataTransferred")
+				case "invalid bytes":
+					row["dataTransferred"] = "private-bad-counter"
+				case "missing row ID":
+					delete(row, "id")
+				case "null end":
+					row["endTime"] = nil
+				case "missing end":
+					delete(row, "endTime")
+				case "lower boundary":
+					row["endTime"] = "2026-11-03T10:00:00Z"
+				case "upper boundary":
+					row["endTime"] = "2026-11-03T11:00:00Z"
+				case "invalid UTC":
+					row["startTime"] = "0000-01-01T00:00:00+01:00"
+				case "duplicate":
+					rows = append(rows, row)
+				case "changed duplicate":
+					changed := monitoringTaskReportFixtureRow()
+					changed["dataTransferred"] = 40
+					rows = append(rows, changed)
+				case "changed duplicate pages":
+					more, cursor = requests == 1, "next"
+					if requests == 2 {
+						row["dataTransferred"] = 40
+					}
+				case "long report ID":
+					row["reportJobInstanceId"] = strings.Repeat("x", 4097)
+				case "missing cursor":
+					more = true
+				case "long cursor":
+					more, cursor = true, strings.Repeat("x", 4097)
+				case "cyclic cursor":
+					row["id"] = requests
+					more, cursor = true, "same"
+				case "page limit":
+					more, cursor = true, "next"
+				case "result limit", "filtered result limit", "page size":
+					other := monitoringTaskReportFixtureRow()
+					other["id"] = 2
+					rows = append(rows, other)
+					if scenario == "filtered result limit" {
+						row["objectFid"], other["objectFid"] = monitoringFixtureSeries, monitoringFixtureSeries
+					}
+				}
+				response := monitoringTaskReportFixtureConnection(rows, more, cursor)
+				data := response["data"].(map[string]any)
+				connection := data["taskDetailConnection"].(map[string]any)
+				switch scenario {
+				case "missing connection":
+					delete(data, "taskDetailConnection")
+				case "missing nodes":
+					delete(connection, "nodes")
+				case "missing page info":
+					delete(connection, "pageInfo")
+				case "missing page status":
+					delete(connection["pageInfo"].(map[string]any), "hasNextPage")
+				}
+				body, _ := json.Marshal(response)
+				status := 200
+				if scenario == "oversize" {
+					body = append(body, []byte(strings.Repeat(" ", 4<<20))...)
+				}
+				if scenario == "malformed" {
+					body = []byte("{")
+				}
+				if scenario == "denied" {
+					status = 403
+					body = []byte(`{"message":"private-task-report-fixture"}`)
+				}
+				if scenario == "GraphQL" {
+					body = []byte(`{"errors":[{"message":"private-task-report-fixture"}]}`)
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+			})}
+			read, err := ReadProtectionTaskReports(ctx, client, "https://fixture.invalid/api/graphql", options)
+			if scenario == "empty" {
+				if err != nil || !read.Complete || read.Observations == nil || read.Results != 0 {
+					t.Fatal("empty source read not distinguished")
+				}
+				return
+			}
+			if err == nil || read.Complete || read.Observations != nil || strings.Contains(err.Error(), "private-") {
+				t.Fatal("failure leaked or returned partial success")
+			}
+			if scenario == "transport" && !errors.Is(err, authorityErr) {
+				t.Fatal("authority identity lost")
+			}
+			if scenario == "denied" && !errors.Is(err, ErrBackupMonitoringDenied) {
+				t.Fatal("denial identity lost")
+			}
+			if scenario == "canceled" && !errors.Is(err, context.Canceled) {
+				t.Fatal("cancellation identity lost")
+			}
+			if scenario == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("deadline identity lost")
+			}
+			if scenario == "page limit" || scenario == "result limit" || scenario == "filtered result limit" || scenario == "oversize" {
+				if !errors.Is(err, ErrBackupMonitoringLimit) {
+					t.Fatal("limit not classified")
+				}
+			}
+			if scenario == "cyclic cursor" || scenario == "changed duplicate pages" {
+				if requests != 2 {
+					t.Fatal("cycle not bounded")
+				}
+			} else if scenario == "canceled" {
+				if requests != 0 {
+					t.Fatal("canceled read reached source")
+				}
+			} else if requests != 1 {
+				t.Fatal("unexpected retry or extra request")
+			}
+		})
+	}
+}
+
+func TestProtectionTaskReportsInvalidOptions(t *testing.T) {
+	for _, scenario := range []string{"scope", "workload only", "invalid UUID", "scope limit", "duplicate scope", "zero time", "reversed", "non UTC", "year", "statuses", "duplicate status", "long status", "status count", "types", "type count", "pages", "page size", "results", "duration", "endpoint", "nil context", "nil client"} {
+		t.Run(scenario, func(t *testing.T) {
+			options, ctx, endpoint := monitoringTaskReportFixtureOptions(), t.Context(), "https://fixture.invalid/api/graphql"
+			client := &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) {
+				t.Fatal("invalid options reached network")
+				return nil, nil
+			})}
+			switch scenario {
+			case "scope":
+				options.Scope = BackupActivityScope{}
+			case "workload only":
+				options.Scope.ClusterIDs = nil
+			case "invalid UUID":
+				options.Scope.ClusterIDs = []string{"name"}
+			case "scope limit":
+				options.Scope.ClusterIDs = make([]string, 101)
+			case "duplicate scope":
+				options.Scope.ClusterIDs = append(options.Scope.ClusterIDs, monitoringFixtureCluster)
+			case "zero time":
+				options.Start = time.Time{}
+			case "reversed":
+				options.End = options.Start
+			case "non UTC":
+				options.Start = options.Start.In(time.FixedZone("fixture", 3600))
+			case "year":
+				options.End = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+			case "statuses":
+				options.Statuses = nil
+			case "duplicate status":
+				options.Statuses = append(options.Statuses, options.Statuses[0])
+			case "long status":
+				options.Statuses = []string{strings.Repeat("x", 129)}
+			case "status count", "type count":
+				values := make([]string, 101)
+				for index := range values {
+					values[index] = strings.Repeat("x", index+1)
+				}
+				if scenario == "status count" {
+					options.Statuses = values
+				} else {
+					options.TaskTypes = values
+				}
+			case "types":
+				options.TaskTypes = nil
+			case "pages":
+				options.Limits.MaxPages = 101
+			case "page size":
+				options.Limits.PageSize = 0
+			case "results":
+				options.Limits.MaxResults = 10001
+			case "duration":
+				options.Limits.MaxDuration = 2 * time.Minute
+			case "endpoint":
+				endpoint = "http://not-local.invalid/api/graphql"
+			case "nil context":
+				ctx = nil
+			case "nil client":
+				client = nil
+			}
+			read, err := ReadProtectionTaskReports(ctx, client, endpoint, options)
+			if !errors.Is(err, ErrBackupMonitoringOptions) || read.Complete {
+				t.Fatal("invalid options accepted")
+			}
+		})
+	}
+}
+
+func TestProtectionTaskReportRevisionsAndUnknownExecutionSemantics(t *testing.T) {
+	capabilities := BackupTaskReportSourceCapabilities()
+	if capabilities != (BackupTaskReportCapabilities{ProtectionTaskEnumeration: true, TaskWorkloadClusterBinding: true,
+		EndTimeWindows: true, TaskBoundaryElapsedTime: true, TaskTransferredByteTotals: true}) {
+		t.Fatal("unsupported execution, history, root/child, retry or transfer guarantee promoted")
+	}
+	eventContract := (BackupActivityObservation{}).DataTransferredContract()
+	if eventContract.Scope != "event-associated" || eventContract.Unit != "bytes" || eventContract.TotalForScope {
+		t.Fatal("event-associated bytes reinterpreted as task totals")
+	}
+	requests := 0
+	client := &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
+		requests++
+		row, concurrent := monitoringTaskReportFixtureRow(), monitoringTaskReportFixtureRow()
+		concurrent["id"], concurrent["reportJobInstanceId"] = 2, monitoringFixtureTaskchain
+		row["reportJobInstanceId"] = monitoringFixtureTaskchain
+		if requests >= 2 {
+			row["dataTransferred"] = 40
+		}
+		if requests >= 4 {
+			row["dataTransferred"] = nil
+		}
+		body, _ := json.Marshal(monitoringTaskReportFixtureConnection([]any{row, concurrent}, false, nil))
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+	})}
+	var observations []BackupTaskReportObservation
+	for range 4 {
+		read, err := ReadProtectionTaskReports(t.Context(), client, "https://fixture.invalid/api/graphql", monitoringTaskReportFixtureOptions())
+		if err != nil || len(read.Observations) != 2 {
+			t.Fatalf("concurrent report rows collapsed: %v", err)
+		}
+		observations = append(observations, read.Observations[0])
+	}
+	if observations[0].RevisionFingerprint() == observations[1].RevisionFingerprint() || observations[1].RevisionFingerprint() != observations[2].RevisionFingerprint() || observations[2].RevisionFingerprint() == observations[3].RevisionFingerprint() {
+		t.Fatal("late correction/replay/null revision lost")
+	}
+	if value, known := observations[0].DataTransferred(); !known || value != 100 {
+		t.Fatal("earlier observation mutated")
+	}
+	if value, known := observations[1].DataTransferred(); !known || value != 40 {
+		t.Fatal("decreasing raw total hidden")
+	}
+	if _, known := observations[3].DataTransferred(); known {
+		t.Fatal("unknown total became zero")
+	}
+	if value, known := observations[0].SourceDuration(); !known || value != 123 {
+		t.Fatal("unknown-unit duration was reinterpreted")
+	}
+	for _, contract := range []BackupTransferredBytesContract{observations[0].DataTransferredContract(), (BackupActivityObservation{}).DataTransferredContract()} {
+		if contract.CounterMode != BackupTransferCounterUnknown || contract.ExecutionBindingVerified || contract.RetryResetBehaviorVerified || contract.BaselineCompatibilityVerified || contract.CumulativeDeltaSupported || contract.CompressionVerified || contract.PhysicalMeaningVerified {
+			t.Fatal("unverified delta/counter semantics advertised")
+		}
+	}
+	for _, scenario := range []string{"null", "zero", "reversed", "overflow"} {
+		source := backupTaskReportWire{StartTime: monitoringNullable[time.Time]{value: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC), known: true}}
+		source.EndTime = source.StartTime
+		switch scenario {
+		case "null":
+			source.StartTime.known = false
+		case "reversed":
+			source.EndTime.value = source.StartTime.value.Add(-time.Second)
+		case "overflow":
+			source.EndTime.value = source.StartTime.value.AddDate(300, 0, 0)
+		}
+		value, known := (BackupTaskReportObservation{source: source}).BoundaryElapsedDuration()
+		if known != (scenario == "zero") || value != 0 {
+			t.Fatal("invalid task interval or true zero lost")
+		}
+	}
+}
+
+func TestProtectionTaskReportsScopedEvidence(t *testing.T) {
+	options := BackupTaskReportReadOptions{Scope: monitoringFixtureOptions().Scope, Start: monitoringFixtureOptions().Window.Start,
+		End: monitoringFixtureOptions().Window.End, Statuses: []string{"fixture-terminal"}, TaskTypes: []string{"fixture-backup"}, Limits: monitoringFixtureOptions().Limits}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		requests++
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		filter := payload.Variables["filter"].(map[string]any)
+		if filter["time_gt"] != "2026-11-03T10:00:00Z" || filter["time_lt"] != "2026-11-03T11:00:00Z" ||
+			filter["clusterUuid"].([]any)[0] != monitoringFixtureCluster || filter["taskCategory"].([]any)[0] != "Protection" || filter["searchTerm"] != nil {
+			t.Error("incorrect source scope/window or fuzzy identity selection")
+		}
+		workload, rowID := monitoringFixtureWorkload, 1
+		if requests == 1 {
+			workload = monitoringFixtureSeries
+		} else {
+			rowID = 2
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"taskDetailConnection": map[string]any{
+			"nodes": []any{map[string]any{"id": rowID, "reportJobInstanceId": "opaque-report-column", "objectFid": workload,
+				"clusterUuid": monitoringFixtureCluster, "taskCategory": "Protection", "taskType": "fixture-backup", "status": "fixture-terminal",
+				"startTime": "2026-11-03T10:10:00Z", "endTime": "2026-11-03T10:30:00Z", "duration": 123,
+				"dataTransferred": 0, "logicalBytes": 1000, "physicalBytes": nil}},
+			"pageInfo": map[string]any{"hasNextPage": requests == 1, "endCursor": "next"}}}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := client.ReadProtectionTaskReports(t.Context(), options)
+	if err != nil || !read.Complete || read.Atomic || read.CompleteEventHistory || read.Pages != 2 || read.ScannedResults != 2 || read.Results != 1 {
+		t.Fatalf("bounded report read: %v", err)
+	}
+	observation := read.Observations[0]
+	if value, known := observation.DataTransferred(); !known || value != 0 {
+		t.Fatal("zero task total lost")
+	}
+	if _, known := observation.PhysicalBytes(); known {
+		t.Fatal("null physical bytes became zero")
+	}
+	if value, known := observation.ReportJobInstanceID(); !known || value != "opaque-report-column" {
+		t.Fatal("opaque report column relabeled")
+	}
+	if value, known := observation.BoundaryElapsedDuration(); !known || value != 20*time.Minute {
+		t.Fatal("task boundary interval lost")
+	}
+	contract := observation.DataTransferredContract()
+	if !contract.TotalForScope || contract.Scope != "task" || contract.CounterMode != BackupTransferCounterUnknown || contract.CumulativeDeltaSupported || contract.BaselineCompatibilityVerified {
+		t.Fatal("task total reinterpreted as cumulative execution bytes")
+	}
+	if read.SourceScope.WorkloadIDs != nil || len(read.SourceScope.ClusterIDs) != 1 {
+		t.Fatal("source workload filtering invented")
+	}
+	capabilities := BackupTaskReportSourceCapabilities()
+	if !capabilities.ProtectionTaskEnumeration || capabilities.StableExecutionUUID || capabilities.ScheduledExecutionDiscovery || capabilities.RootTaskchainBinding || capabilities.WholeExecutionStatus {
+		t.Fatal("unsupported scheduled execution contract advertised")
+	}
+	fingerprint := observation.RevisionFingerprint()
+	options.Scope.WorkloadIDs[0], options.Scope.ClusterIDs[0] = monitoringFixtureSeries, monitoringFixtureSeries
+	options.Statuses[0], options.TaskTypes[0] = "changed", "changed"
+	if read.Scope.WorkloadIDs[0] != monitoringFixtureWorkload || read.Scope.ClusterIDs[0] != monitoringFixtureCluster ||
+		read.SourceScope.ClusterIDs[0] != monitoringFixtureCluster || read.Statuses[0] != "fixture-terminal" ||
+		read.TaskTypes[0] != "fixture-backup" || observation.RevisionFingerprint() != fingerprint {
+		t.Fatal("caller options mutated coverage or immutable source evidence")
+	}
+}
+
 func monitoringFixtureOptions() BackupActivityReadOptions {
 	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
 	return BackupActivityReadOptions{

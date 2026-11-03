@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.3.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.4.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -402,6 +402,195 @@ References: [ActivitySeries](https://developer.rubrik.com/Rubrik-Security-Cloud-
 [TaskchainState](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/TaskchainState/),
 and [TakeOnDemandSnapshotTaskchainUuid](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/TakeOnDemandSnapshotTaskchainUuid/).
 
+### Protection task reports beyond v0.3.0
+
+`Client.ReadProtectionTaskReports` / `ReadProtectionTaskReports` expose the
+documented `taskDetailConnection` source without calling task rows scheduled
+backup executions. `BackupTaskReportSourceCapabilities()` reports the narrower
+task guarantees separately; existing `BackupActivitySourceCapabilities()` and
+all v0.3.0 reads/semantics remain unchanged.
+
+```go
+end := time.Now().UTC()
+reports, err := client.ReadProtectionTaskReports(ctx, rsc.BackupTaskReportReadOptions{
+        Scope: rsc.BackupActivityScope{
+                ClusterIDs:  []string{clusterID},
+                WorkloadIDs: []string{workloadID},
+        },
+        Start:    end.Add(-time.Hour),
+        End:      end,
+        Statuses: taskStatusesVerifiedForTenant,
+        TaskTypes: taskTypesVerifiedForTenant,
+        Limits: rsc.BackupActivityReadLimits{
+                PageSize: 100, MaxPages: 10, MaxResults: 1000,
+                MaxDuration: 30 * time.Second,
+        },
+})
+```
+
+The status/type variables above must be nonempty exact source values verified
+for the tenant/workload; the public filter defines strings, not enumerated backup
+states/types. Fixtures deliberately use synthetic values, not claimed vendor
+spellings. `Protection` is the documented required category; it includes more
+than just backups. No scheduled/on-demand or root workflow classification is
+inferred from a task type, report column, username, or SLA association.
+
+The source supports exact cluster UUIDs but **no workload-FID filter**. Require
+1-100 cluster UUIDs; optional 1-100 workload UUIDs are an exact local intersection
+after a bounded cluster scan. Workload-only requests fail before I/O rather than
+searching names or expanding to all clusters. `SourceScope` records the actual
+cluster filter; `Scope` records the requested output selection. UUID-form
+`objectFid` and `clusterUuid` are validated and retained for inventory joins.
+`ScannedResults` includes all source rows, including filtered-out workloads;
+`Results` counts matching rows. `MaxResults` bounds **scanned**, not just returned,
+rows, so a narrow local selection cannot bypass resource limits.
+
+`Start`/`End` filter **task end times** with `time_gt`/`time_lt`, exclusive at both
+ends, not start/update times. Every row must have a known end inside that window.
+This is not a queued/running enumeration or a correction/update feed. The query
+selects `sortBy: EndTime`; source default sort direction and ties are not an
+ordered revision sequence. There is no documented retention horizon, correction
+watermark, revision number, cancellation-request timestamp, or atomic snapshot
+contract. Late corrections to older end times require consumer-owned overlapping
+historical re-reads; a new end-time window alone cannot capture them.
+
+Limits reuse the v0.3.0 explicit 1-100 page-size/page limits, 1-10000 scanned-row
+limit, at-most-one-minute total deadline, 4 MiB response cap, and 4096-byte cursor
+cap. Status/type lists require 1-100 unique values of at most 128 bytes each;
+opaque report IDs are capped at 4096 bytes. Each page uses one SDK attempt through
+the caller's authorized client. Missing selected keys, malformed values,
+out-of-cluster IDs, invalid workload IDs, wrong category/type/status, duplicate
+report-row keys (including changed rows), cursor faults, and exceeded budgets
+return no partial observations. Row keys use cluster/workload, internal row and
+report columns, and task type only to detect pagination inconsistencies; they
+are not promised stable execution identities. Their uniqueness is undocumented;
+collisions fail closed as ambiguity and may reject legitimate report rows, not
+prove that two rows describe the same execution. Failed-read counts and cursors
+are diagnostic only; do not persist observations or advance checkpoints unless
+`err == nil && reports.Complete`.
+
+`Complete` means the mutable connection drained under these filters and budgets.
+`Atomic` and `CompleteEventHistory` remain false, including for empty reads.
+Permission changes, omitted/stale rows, unknown counters, and failed reads never
+imply a terminal execution outcome. Collection timestamps are UTC local receipt,
+not report revision times or source freshness. Immutable nullable getters and
+source-only fingerprints follow v0.3.0; copy getters and known flags into
+consumer-owned persistence records, not default observation JSON.
+
+`ReportRowID()` and `ReportJobInstanceID()` retain the source columns without
+renaming or parsing them. The public documentation describes both as **"The
+invisible column"**: it does not promise UUID shape, stability across corrections
+or retry attempts, scheduled-execution identity, or a join to taskchains or
+activity series. Even a UUID-shaped value equal to another source UUID is not
+proof of that relationship. Distinct task rows for one workload are retained;
+they cannot yet be counted as distinct backup executions or combined as retries.
+`Status()` is raw task status, not normalized whole-backup state. Known-taskchain
+state mapping remains authoritative only for the independently identified
+taskchain, not a discovered scheduled backup root or its children.
+
+`BoundaryElapsedDuration()` uses known ordered task start/end boundaries with
+overflow checks, including genuine zero. It is the interval between task source
+boundaries, not job/workflow elapsed, transfer-phase elapsed, or active transfer
+time. `SourceDuration()` preserves the report's raw integer: the description
+"time taken to run the task" specifies no unit, so no unit is assigned or used
+to replace the boundary interval.
+
+`DataTransferredContract()` distinguishes these sources explicitly:
+
+| Source | Verified meaning | Unsupported interpretation |
+| --- | --- | --- |
+| Activity series | Bytes associated with the event (`Scope: event-associated`). | Counter accumulation/finalization and execution binding. |
+| Protection task report | Total number of bytes transferred for the task (`Scope: task`, `TotalForScope: true`). | Cumulative versus incremental/final-only reporting, execution totals, retry/reset, compression and physical wire-byte meaning. |
+
+Both report `CounterMode: unknown`, false execution/baseline compatibility, and
+false cumulative-delta support. A monotonic-looking sequence does not enable
+deltas; neither does an opaque report ID. Raw task decreases and late revisions
+remain visible rather than being turned into increments/resets. `LogicalBytes()`
+and `PhysicalBytes()` are separate source quantities, not fallbacks for
+transferred bytes or proof of compression/on-wire semantics. Explicit null is
+unknown and zero is known zero, even though some report fields are schema
+non-null. No rate or transfer-phase duration is computed from these selections.
+
+### Capability evidence
+
+Contract review date: 2026-11-03. "Source-unavailable" below means the reviewed
+public contracts do not establish the guarantee, not that every tenant/internal
+API has been proven incapable. Implementation behavior is fixture-verified;
+**all tenant availability and payload compatibility remain live-unverified**.
+
+| Capability | Status | Evidence / boundary |
+| --- | --- | --- |
+| Scoped activity observations and known-taskchain lookup | Implemented / verified contract; fixture-only behavior | v0.3.0, ActivitySeries and Taskchain docs, SDK event/core operations. |
+| Cluster-scoped Protection task enumeration and workload binding | Implemented / verified contract; fixture-only behavior | TaskDetailFilterInput.clusterUuid and TaskDetail.objectFid/clusterUuid; local workload intersection is explicit. |
+| Task end-time windows, boundaries, reported task byte totals | Implemented / verified contract; fixture-only behavior | TaskDetailFilterInput.time_gt/time_lt and TaskDetail startTime/endTime/dataTransferred. |
+| Tenant schema, allowed status/type values, permissions and workload coverage | Live-unverified | Synthetic SDK-backed fixtures do not certify a tenant. |
+| Stable scheduled-execution UUID and concurrent-run/retry identity | Source-unavailable | Report ID columns have no documented identity/stability semantics; task rows are not proven executions. |
+| Scheduled root-taskchain / activity-series / report-row join | Source-unavailable | No typed documented cross-source binding; parentTaskchainId alone proves neither workload nor backup root. |
+| Whole-backup queued/running/terminal state and cancellation-request boundary | Source-unavailable | Report status is an unspecified task string; known taskchain state does not discover or identify the backup root. |
+| Whole-backup start/finish and job elapsed | Source-unavailable for scheduled discovery | Task boundaries are task-scoped; independently bound known taskchains retain v0.3.0 elapsed-time support. |
+| Cumulative execution totals, rates, retry-safe deltas and compression | Source-unavailable | Total task bytes do not establish sample mode, attempt identity, reset, finalization, or physical transfer semantics. |
+| Transfer-phase elapsed and active transfer time | Source-unavailable | No transfer-phase boundaries/active-time field in reviewed typed sources. |
+| Atomic enumeration, complete event history, monotonic revision ordering | Source-unavailable | Mutable end-time pagination has no documented retention/version/snapshot guarantee. |
+
+### Publication guarantees and next verification
+
+- **Current executions:** rscmond can publish raw latest-activity candidates and
+    state for independently known taskchains. It cannot label discovered task
+    reports as authoritative scheduled-backup queued/running state. Cancellation
+    requested/acknowledged, `CANCELING`, and terminal `CANCELED` remain distinct;
+    no cancellation is renamed "abort". Missing, denied, stale, child, or unknown
+    observations never close a run.
+- **Terminal history:** task reports support task-boundary/status records under
+    their explicit scope, not completion counts or deduplicated execution history.
+    Independently verified backup-instance bindings can still use known-taskchain
+    UUID/state/end time and revision fingerprints without counting every poll as
+    a completion. No workflow-root binding is supplied for scheduled tasks.
+- **Bytes and rates:** a consumer can publish nullable raw event-associated
+    bytes and separately labeled reported task-total bytes. It cannot sum repeated
+    totals, derive execution traffic totals, rate counters, absolute differences,
+    logical-byte rates, or transfer-active durations from these guarantees.
+
+Concrete verification needed before promoting any false capability:
+
+1. Obtain Rubrik's documented stable scheduled-execution UUID plus exact
+     workload/cluster, trigger kind, activity-series, and backup-root taskchain
+     relationship. Confirm child/root and retry identity rules, not merely matching
+     report IDs, names, timestamps or opaque `urlMetadata`/configuration.
+2. Obtain documented whole-execution state mappings, cancellation-request/start/
+     finish boundaries, server filters for active executions, retention horizon,
+     revision ordering, and late-correction semantics. Report end-time filtering
+     alone cannot establish current active execution coverage.
+3. Obtain documented counter scope/mode, unit, compression/physical meaning,
+     finalization, execution/attempt epoch, reset behavior, and ordered revisions.
+     Only then implement compatible-baseline checks and nonnegative cumulative
+     differences for the same execution/attempt; null/reset/identity changes must
+     invalidate a baseline. Obtain separate transfer-phase boundaries and active
+     transfer time before exposing either duration.
+4. After those contracts exist, request explicitly authorized, read-only tenant
+     validation using supplied credentials and aggregate-only sanitized evidence.
+     Confirm schemas, supported exact values, permissions, bindings and paging.
+     Payload coincidences alone do not prove semantic guarantees. No live probes,
+     initiation/cancellation for discovery, alternate CDM backend, or consumer/
+     deployment modifications are part of this implementation.
+
+Source audit: the public [query index](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/)
+and SDK event/core operations were reviewed. [jobInfo](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/jobInfo/)
+polls a known selected CDM request under Admin/Owner roles, not scheduled discovery.
+[reportData](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/reportData/)
+accepts string report columns without supplying execution identity contracts.
+[allNcdTaskData](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/allNcdTaskData/)
+returns description/site/end-status/timestamp, no workload/job UUID.
+[snappableTaskSearch](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/snappableTaskSearch/)
+searches Microsoft To-Do content, not backup jobs.
+[cloudDirectEventSeriesTaskReport](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/cloudDirectEventSeriesTaskReport/)
+exports failed-file paths for completed jobs, not identity/lifecycle enumeration;
+no report download or private path parsing is attempted.
+
+New source references: [taskDetailConnection](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/taskDetailConnection/),
+[TaskDetail](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/TaskDetail/),
+[TaskDetailFilterInput](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/inputs/TaskDetailFilterInput/),
+and [TaskDetailSortByEnum](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/TaskDetailSortByEnum/).
+
 ## Cluster member load
 
 `Client.NodeStats(ctx, clusterFilter, options)` and
@@ -464,7 +653,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.3.0
+require github.com/otuschhoff/rsc-go v0.4.0
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```

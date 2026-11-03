@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.0 - 2026-11-03
+
+- Add bounded SDK-backed Protection task-report reads with explicit cluster
+  UUID scope, optional local workload selection, exact raw task/status selection,
+  and exclusive task-end-time windows. Scan budgets include filtered-out rows;
+  incomplete pages, duplicate row keys, malformed identities and exceeded limits
+  return no partial observations.
+- Preserve immutable nullable task report IDs, workload/cluster bindings, raw
+  task status, start/end boundaries, unscaled source duration, separate logical/
+  physical bytes and reported task-total transferred bytes, with source-only
+  revision fingerprints and explicit source/output coverage metadata.
+- Add separate task-report capabilities and transferred-byte contracts without
+  changing v0.3.0 API semantics: task totals are not cumulative execution counters,
+  and task boundary intervals are not whole-job or active transfer durations.
+- Document evidence, consumer publication limits and concrete verification steps
+  for unavailable scheduled-execution/root/series bindings, retry grouping,
+  whole-execution lifecycle, counter mode/compression and transfer-phase metrics.
+- Extend SDK-backed fixtures for exact filters, concurrent task rows, late
+  corrections, reset-like decreases, null/zero counters, unsupported semantics,
+  denied access, incomplete enumeration and bounded request/resource failures.
+  Live tenant support remains unverified; polling/persistence remain consumer-owned.
+
 ## v0.3.0 - 2026-11-03
 
 - Add bounded, exact workload/cluster-scoped backup activity observations using
