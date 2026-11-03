@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.1.2`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.2.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -91,6 +91,60 @@ Persist observations separately under the consuming application's policy.
 The library does not save files, create directories, discover CDOT objects,
 manage Git, or maintain a singleton/global cache. Per-request user-agent and
 logging hooks are available through `WithRequestOptions`.
+
+## Snapshot locations and contents
+
+`Client.WorkloadSnapshots(ctx, workloadID)` / `FetchSnapshotsForWorkload` list
+snapshots with CDM local, archival, and replication locations. Each location
+includes its ID, name, cluster UUID, type, and nullable active flag. The existing
+`Snapshots` rows also retain archive names and derive their storage labels from
+these selections. `DetermineSnapshotStorage` preserves `rubrik` for local,
+`archiv` for archive, `replica` for replication, and combined labels for multiple
+copies; unavailable location information is `unknown` for typed snapshots.
+Migration states remain explicit. Missing page metadata and nonadvancing/cyclic
+cursors fail without partial workload lists. Location metadata, including an
+inactive location, does not by itself certify present restore availability.
+
+For one snapshot, `Client.SnapshotFiles(ctx, snapshotID, SnapshotFilesOptions)` /
+`FetchSnapshotFiles` browse the indexed files and folders through
+`browseSnapshotFileConnection`. Use the persistent RSC snapshot UUID from the
+listing, not a CDM snapshot ID. `Path` defaults to `/`; supply the API's path
+for other roots. Paths are passed verbatim, including Windows paths.
+Each call returns one page of entries with absolute/display/relative paths,
+filename, file mode, size, nullable modification time, and status message.
+`First` is 1-100 (default 100); continue using `EndCursor` as `After` while
+`HasNextPage` is true. Optional prefix-search settings are passed to the API.
+
+For a recursive, unfiltered subtree listing:
+
+```go
+manifest, err := client.SnapshotFileManifest(ctx, snapshotID, "/", rsc.SnapshotManifestLimits{
+    MaxPages:   100,
+    MaxEntries: 10000,
+})
+```
+
+`SnapshotFileManifest` / `FetchSnapshotFileManifest` traverse directories and
+all their pages, retaining symlinks without following them. Limits are global
+across the subtree: 1-100 pages and 1-10000 entries, with those maxima as
+defaults. Both browse and manifest reads have a maximum one-minute deadline,
+one SDK attempt per page, 4 MiB per response, and 4096-byte cursors. Shorter
+caller deadlines remain authoritative. Incomplete responses, cycles, duplicate
+paths, unsupported traversal modes, exceeded bounds, or any page failure
+return no partial manifest. Successful empty listings have non-nil entry slices.
+
+The public RSC `SnapshotFile` and fileset browse schemas do **not** expose POSIX
+inode numbers or hard-link identity. These APIs enumerate logical indexed
+snapshot members by path; they do not invent inode IDs, identify which bytes
+were newly copied by an incremental backup, or certify recoverability. Preserve
+and inspect entry status messages. Indexing, workload support, permissions, and
+archive browse availability remain tenant-dependent; errors are not converted
+to empty listings. No archive hydration, restore/mount, or live-file-system scan
+is initiated. Live-tenant behavior remains unverified.
+
+Schema contracts: [CdmSnapshot](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/CdmSnapshot/),
+[browseSnapshotFileConnection](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/queries/browseSnapshotFileConnection/),
+and [SnapshotFile](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/SnapshotFile/).
 
 ## NAS primary-fileset assignments
 
@@ -231,7 +285,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.1.2
+require github.com/otuschhoff/rsc-go v0.2.0
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```

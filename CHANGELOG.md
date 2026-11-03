@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.0 - 2026-11-03
+
+- Select CDM snapshot local, archival, and replication locations; retain location
+  IDs/names and active metadata, and report combined storage copies accurately.
+- Reject incomplete workload snapshot pagination and stalled/cyclic cursors
+  without returning partial lists.
+- Add paged snapshot file browsing with paths, file modes, sizes, timestamps,
+  status messages, and optional prefix-search controls.
+- Add bounded recursive snapshot file manifests with directory pagination,
+  symlink preservation without traversal, and no partial results on failure.
+- Document that the public browse schema does not expose POSIX inode numbers,
+  hard-link identity, incremental-copy history, or proof of recoverability.
+
 ## v0.1.2 - 2026-11-03
 
 - Add paged backup job listing with workload/cluster/status filters, progress,

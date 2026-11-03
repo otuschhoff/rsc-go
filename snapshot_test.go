@@ -11,6 +11,267 @@ import (
 	"time"
 )
 
+func TestWorkloadSnapshotsPagination(t *testing.T) {
+	for _, scenario := range []string{"valid", "empty", "missing connection", "missing status", "missing cursor", "repeated cursor"} {
+		t.Run(scenario, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				requests++
+				writer.Header().Set("Content-Type", "application/json")
+				switch scenario {
+				case "empty":
+					_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`))
+				case "missing connection":
+					_, _ = writer.Write([]byte(`{"data":{}}`))
+				case "missing status":
+					_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[],"pageInfo":{}}}}`))
+				case "missing cursor":
+					_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}`))
+				default:
+					if requests == 1 || scenario == "repeated cursor" {
+						_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[{"id":"first"}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}`))
+					} else {
+						var payload struct {
+							Query string `json:"query"`
+						}
+						if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || !strings.Contains(payload.Query, `after: "next"`) {
+							t.Errorf("missing continuation cursor: %s / %v", payload.Query, err)
+						}
+						_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[{"id":"second"}],"pageInfo":{"hasNextPage":false}}}}`))
+					}
+				}
+			}))
+			defer server.Close()
+			nodes, err := FetchSnapshotsForWorkload(context.Background(), server.Client(), server.URL, "workload")
+			if scenario == "valid" {
+				if err != nil || len(nodes) != 2 || nodes[1].ID != "second" || requests != 2 {
+					t.Fatalf("pages = %#v / %v", nodes, err)
+				}
+			} else if scenario == "empty" {
+				if err != nil || nodes == nil || len(nodes) != 0 {
+					t.Fatalf("empty = %#v / %v", nodes, err)
+				}
+			} else if err == nil || nodes != nil {
+				t.Fatalf("incomplete snapshots = %#v / %v", nodes, err)
+			}
+		})
+	}
+}
+
+func TestSnapshotStorageCopies(t *testing.T) {
+	for _, test := range []struct {
+		node SnapshotGQLNode
+		want string
+	}{
+		{node: SnapshotGQLNode{IsLocal: true, IsReplica: true}, want: "rubrik, replica"},
+		{node: SnapshotGQLNode{IsArchived: true, IsReplica: true}, want: "archiv, replica"},
+		{node: SnapshotGQLNode{IsLocal: true, IsArchived: true, IsReplica: true}, want: "rubrik, archiv, replica"},
+		{node: SnapshotGQLNode{SnapshotType: "CloudNativeSnapshot"}, want: "unknown"},
+	} {
+		if got := DetermineSnapshotStorage(test.node); got != test.want {
+			t.Errorf("storage = %q, want %q", got, test.want)
+		}
+	}
+}
+
+func TestSnapshotFilesOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.Variables["path"] != `C:\data\"folder` || payload.Variables["after"] != "next" || payload.Variables["searchPrefix"] != `file"` || payload.Variables["isPrefixSearch"] != true || payload.Variables["first"] != float64(7) {
+			t.Errorf("browse options lost: %#v", payload.Variables)
+		}
+		_, _ = writer.Write([]byte(`{"data":{"browseSnapshotFileConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, prefix, prefixSearch := "next", `file"`, true
+	if _, err := client.SnapshotFiles(context.Background(), "snapshot", SnapshotFilesOptions{Path: `C:\data\"folder`, First: 7, After: &cursor, SearchPrefix: &prefix, IsPrefixSearch: &prefixSearch}); err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []SnapshotFilesOptions{{First: -1}, {First: 101}} {
+		if _, err := FetchSnapshotFiles(context.Background(), server.Client(), server.URL, "snapshot", options); err == nil {
+			t.Fatal("invalid page size accepted")
+		}
+	}
+	if _, err := FetchSnapshotFiles(context.Background(), server.Client(), server.URL, "", SnapshotFilesOptions{}); err == nil {
+		t.Fatal("empty snapshot UUID accepted")
+	}
+}
+
+func TestSnapshotFilesFailures(t *testing.T) {
+	valid := `{"absolutePath":"/file","filename":"file","fileMode":"FILE","size":0}`
+	for _, test := range []struct {
+		name      string
+		body      string
+		status    int
+		wantError bool
+	}{
+		{name: "empty", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`},
+		{name: "missing", body: `{"data":{}}`, wantError: true},
+		{name: "null entry", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[null],"pageInfo":{"hasNextPage":false}}}}`, wantError: true},
+		{name: "missing metadata", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[{"absolutePath":"/file"}],"pageInfo":{"hasNextPage":false}}}}`, wantError: true},
+		{name: "missing status", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[],"pageInfo":{}}}}`, wantError: true},
+		{name: "missing cursor", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}`, wantError: true},
+		{name: "duplicate", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[` + valid + `,` + valid + `],"pageInfo":{"hasNextPage":false}}}}`, wantError: true},
+		{name: "oversized", body: `{"data":{"browseSnapshotFileConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}` + strings.Repeat(" ", 4<<20), wantError: true},
+		{name: "GraphQL", body: `{"errors":[{"message":"snapshot is not indexed"}]}`, wantError: true},
+		{name: "HTTP", body: `{"message":"unavailable"}`, status: 503, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				requests++
+				writer.Header().Set("Content-Type", "application/json")
+				if test.status != 0 {
+					writer.WriteHeader(test.status)
+				}
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			page, err := FetchSnapshotFiles(context.Background(), server.Client(), server.URL, "snapshot", SnapshotFilesOptions{})
+			if (err != nil) != test.wantError || requests != 1 {
+				t.Fatalf("error/requests = %v/%d", err, requests)
+			}
+			if test.wantError && page.Entries != nil {
+				t.Fatal("failed browse returned a partial page")
+			}
+			if !test.wantError && page.Entries == nil {
+				t.Fatal("empty browse must have non-nil entries")
+			}
+		})
+	}
+}
+
+func TestSnapshotManifestLimits(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		limits SnapshotManifestLimits
+		mode   string
+	}{
+		{name: "pages", limits: SnapshotManifestLimits{MaxPages: 1}, mode: "DIRECTORY"},
+		{name: "entries", limits: SnapshotManifestLimits{MaxEntries: 1}, mode: "FILE"},
+		{name: "directory cycle", mode: "DIRECTORY"},
+		{name: "unknown mode", mode: "OTHER"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				entryPath := "/entry"
+				if test.name == "directory cycle" {
+					entryPath = "/"
+				}
+				entries := []map[string]any{{"absolutePath": entryPath, "filename": "entry", "fileMode": test.mode, "size": 0}}
+				if test.name == "entries" {
+					entries = append(entries, map[string]any{"absolutePath": "/other", "filename": "other", "fileMode": "FILE", "size": 0})
+				}
+				_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{"browseSnapshotFileConnection": map[string]any{"nodes": entries, "pageInfo": map[string]any{"hasNextPage": false}}}})
+			}))
+			defer server.Close()
+			manifest, err := FetchSnapshotFileManifest(context.Background(), server.Client(), server.URL, "snapshot", "", test.limits)
+			if err == nil || manifest.Entries != nil {
+				t.Fatalf("incomplete manifest returned %+v / %v", manifest, err)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := FetchSnapshotFiles(ctx, http.DefaultClient, "https://example.invalid/api/graphql", "snapshot", SnapshotFilesOptions{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation identity lost: %v", err)
+	}
+}
+
+func TestSnapshotFileManifest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Query     string `json:"query"`
+			Variables struct {
+				SnapshotID string  `json:"snapshotID"`
+				Path       string  `json:"path"`
+				After      *string `json:"after"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		if payload.Variables.SnapshotID != `snapshot-"1` || !strings.Contains(payload.Query, "browseSnapshotFileConnection(snapshotFid: $snapshotID") {
+			t.Errorf("unexpected browse request: %+v", payload)
+		}
+		if payload.Variables.Path == "/" && payload.Variables.After == nil {
+			_, _ = writer.Write([]byte(`{"data":{"browseSnapshotFileConnection":{"nodes":[{"absolutePath":"/dir","path":"dir","displayPath":"/dir","filename":"dir","fileMode":"DIRECTORY","size":0,"lastModified":null,"statusMessage":""}],"pageInfo":{"hasNextPage":true,"endCursor":"page-2"}}}}`))
+		} else if payload.Variables.Path == "/" && payload.Variables.After != nil && *payload.Variables.After == "page-2" {
+			_, _ = writer.Write([]byte(`{"data":{"browseSnapshotFileConnection":{"nodes":[{"absolutePath":"/link","path":"link","filename":"link","fileMode":"SYMLINK","size":4,"lastModified":null,"statusMessage":""}],"pageInfo":{"hasNextPage":false}}}}`))
+		} else if payload.Variables.Path == "/dir" {
+			_, _ = writer.Write([]byte(`{"data":{"browseSnapshotFileConnection":{"nodes":[{"absolutePath":"/dir/file","path":"dir/file","filename":"file","fileMode":"FILE","size":123,"lastModified":"2026-11-03T10:00:00Z","statusMessage":"indexed"}],"pageInfo":{"hasNextPage":false}}}}`))
+		} else {
+			t.Errorf("unexpected directory/cursor: %+v", payload.Variables)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := client.SnapshotFileManifest(context.Background(), `snapshot-"1`, "", SnapshotManifestLimits{})
+	if err != nil || len(manifest.Entries) != 3 || manifest.Pages != 3 || requests != 3 || manifest.RootPath != "/" {
+		t.Fatalf("manifest = %+v / %v, requests=%d", manifest, err, requests)
+	}
+	if manifest.Entries[0].LastModified != nil || manifest.Entries[1].FileMode != "SYMLINK" ||
+		manifest.Entries[2].Size == nil || *manifest.Entries[2].Size != 123 || manifest.Entries[2].LastModified == nil || manifest.Entries[2].StatusMessage != "indexed" {
+		t.Fatalf("file metadata lost: %+v", manifest.Entries)
+	}
+}
+
+func TestWorkloadSnapshotLocations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		for _, field := range []string{"localLocations", "archivalLocations", "replicationLocations", "clusterUuid", "isActive"} {
+			if !strings.Contains(payload.Query, field) {
+				t.Errorf("snapshot query missing %s", field)
+			}
+		}
+		_, _ = writer.Write([]byte(`{"data":{"snapshotOfASnappableConnection":{"nodes":[
+			{"id":"both","localLocations":[{"id":"local","name":"lab","clusterUuid":"cluster","type":"LOCAL","isActive":true,"isArchived":false}],"archivalLocations":[{"id":"archive","name":"vault","clusterUuid":"cluster","type":"ARCHIVAL","isActive":true,"isArchived":true}],"replicationLocations":[]},
+			{"id":"archive-only","localLocations":[],"archivalLocations":[{"id":"archive","name":"vault"}],"replicationLocations":[]},
+			{"id":"local-only","localLocations":[{"id":"local"}],"archivalLocations":[],"replicationLocations":[]},
+			{"id":"replica-only","localLocations":[],"archivalLocations":[],"replicationLocations":[{"id":"replica"}]},
+			{"id":"unknown","localLocations":[],"archivalLocations":[],"replicationLocations":[]}
+		],"pageInfo":{"hasNextPage":false}}}}`))
+	}))
+	defer server.Close()
+	nodes, err := FetchSnapshotsForWorkload(context.Background(), server.Client(), server.URL, "workload")
+	if err != nil || len(nodes) != 5 {
+		t.Fatalf("snapshots = %#v / %v", nodes, err)
+	}
+	for index, want := range []string{"rubrik, archiv", "archiv", "rubrik", "replica", "unknown"} {
+		if got := DetermineSnapshotStorage(nodes[index]); got != want {
+			t.Errorf("%s storage = %q, want %q", nodes[index].ID, got, want)
+		}
+	}
+	if !nodes[0].IsLocal || !nodes[0].IsArchived || len(nodes[0].ArchivalLocationInfo) != 1 || nodes[0].ArchivalLocationInfo[0].Name != "vault" ||
+		nodes[0].LocalLocations[0].IsActive == nil || !*nodes[0].LocalLocations[0].IsActive {
+		t.Fatalf("location metadata lost: %+v", nodes[0])
+	}
+}
+
 func TestBackupJobLifecycle(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {

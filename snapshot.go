@@ -75,7 +75,16 @@ type SnapshotGQLArchivalLocation struct {
 	TieringState string `json:"tieringState"`
 }
 
+type SnapshotDataLocation struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ClusterID string `json:"clusterUuid"`
+	Type      string `json:"type"`
+	IsActive  *bool  `json:"isActive"`
+}
+
 type SnapshotGQLNode struct {
+	SnapshotType         string                        `json:"__typename"`
 	ID                   string                        `json:"id"`
 	Date                 any                           `json:"date"`
 	Size                 *int64                        `json:"size"`
@@ -90,6 +99,9 @@ type SnapshotGQLNode struct {
 	TimeTaken            any                           `json:"timeTaken"`
 	BackupDuration       any                           `json:"backupDuration"`
 	ArchivalLocationInfo []SnapshotGQLArchivalLocation `json:"archivalLocationInfo"`
+	LocalLocations       []SnapshotDataLocation        `json:"localLocations"`
+	ArchivalLocations    []SnapshotDataLocation        `json:"archivalLocations"`
+	ReplicationLocations []SnapshotDataLocation        `json:"replicationLocations"`
 	SLADomain            struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -662,9 +674,10 @@ func MatchActivityToSnapshot(snap SnapshotRow, act ActivitySeriesGQLNode) bool {
 }
 
 func FetchSnapshotsForWorkload(ctx context.Context, client *http.Client, endpoint, workloadID string) ([]SnapshotGQLNode, error) {
-	const queryTemplate = `query OpsctlSnapshotsForWorkload { snapshotOfASnappableConnection(first: 100, after: %s, workloadId: %q) { nodes { id date expirationDate isOnDemand: isOnDemandSnapshot ... on CdmSnapshot { cloudState slaDomain { id name } } } pageInfo { endCursor hasNextPage } } }`
-	var snapshots []SnapshotGQLNode
+	const queryTemplate = `query OpsctlSnapshotsForWorkload { snapshotOfASnappableConnection(first: 100, after: %s, workloadId: %q) { nodes { __typename id date expirationDate isOnDemand: isOnDemandSnapshot ... on CdmSnapshot { cloudState slaDomain { id name } localLocations { id name clusterUuid type isActive } archivalLocations { id name clusterUuid type isActive } replicationLocations { id name clusterUuid type isActive } } } pageInfo { endCursor hasNextPage } } }`
+	snapshots := make([]SnapshotGQLNode, 0)
 	var after *string
+	seen := make(map[string]bool)
 	for {
 		afterValue := "null"
 		if after != nil {
@@ -673,11 +686,11 @@ func FetchSnapshotsForWorkload(ctx context.Context, client *http.Client, endpoin
 		query := fmt.Sprintf(queryTemplate, afterValue, workloadID)
 		var response struct {
 			Data struct {
-				Snapshots struct {
+				Snapshots *struct {
 					Nodes    []SnapshotGQLNode `json:"nodes"`
-					PageInfo struct {
+					PageInfo *struct {
 						EndCursor   *string `json:"endCursor"`
-						HasNextPage bool    `json:"hasNextPage"`
+						HasNextPage *bool   `json:"hasNextPage"`
 					} `json:"pageInfo"`
 				} `json:"snapshotOfASnappableConnection"`
 			} `json:"data"`
@@ -685,11 +698,31 @@ func FetchSnapshotsForWorkload(ctx context.Context, client *http.Client, endpoin
 		if err := ExecuteSLAGraphQL(ctx, client, endpoint, query, &response); err != nil {
 			return nil, err
 		}
-		snapshots = append(snapshots, response.Data.Snapshots.Nodes...)
-		if !response.Data.Snapshots.PageInfo.HasNextPage || response.Data.Snapshots.PageInfo.EndCursor == nil {
+		if response.Data.Snapshots == nil || response.Data.Snapshots.Nodes == nil || response.Data.Snapshots.PageInfo == nil || response.Data.Snapshots.PageInfo.HasNextPage == nil {
+			return nil, fmt.Errorf("RSC workload snapshot response is incomplete")
+		}
+		for _, node := range response.Data.Snapshots.Nodes {
+			node.IsLocal = node.IsLocal || len(node.LocalLocations) > 0
+			node.IsArchived = node.IsArchived || len(node.ArchivalLocations) > 0
+			node.IsReplica = node.IsReplica || len(node.ReplicationLocations) > 0
+			if len(node.ArchivalLocationInfo) == 0 {
+				for _, location := range node.ArchivalLocations {
+					node.ArchivalLocationInfo = append(node.ArchivalLocationInfo, SnapshotGQLArchivalLocation{
+						Name: location.Name, LocationID: location.ID,
+					})
+				}
+			}
+			snapshots = append(snapshots, node)
+		}
+		if !*response.Data.Snapshots.PageInfo.HasNextPage {
 			break
 		}
-		after = response.Data.Snapshots.PageInfo.EndCursor
+		cursor := response.Data.Snapshots.PageInfo.EndCursor
+		if cursor == nil || *cursor == "" || len(*cursor) > 4096 || seen[*cursor] {
+			return nil, fmt.Errorf("RSC workload snapshot pagination did not advance")
+		}
+		seen[*cursor] = true
+		after = cursor
 	}
 	return snapshots, nil
 }
@@ -731,17 +764,24 @@ func DetermineSnapshotStorage(node SnapshotGQLNode) string {
 		}
 	}
 
-	isArchived := node.IsArchived || cloudState == "ARCHIVED" || cloudState == "TIERED" || len(node.ArchivalLocationInfo) > 0
-	isLocal := node.IsLocal
+	isArchived := node.IsArchived || cloudState == "ARCHIVED" || cloudState == "TIERED" || len(node.ArchivalLocationInfo) > 0 || len(node.ArchivalLocations) > 0
+	isLocal := node.IsLocal || len(node.LocalLocations) > 0
 
-	if isArchived && isLocal {
-		return "rubrik, archiv"
+	var locations []string
+	if isLocal {
+		locations = append(locations, "rubrik")
 	}
 	if isArchived {
-		return "archiv"
+		locations = append(locations, "archiv")
 	}
-	if node.IsReplica {
-		return "replica"
+	if node.IsReplica || len(node.ReplicationLocations) > 0 {
+		locations = append(locations, "replica")
+	}
+	if len(locations) > 0 {
+		return strings.Join(locations, ", ")
+	}
+	if node.SnapshotType != "" || node.LocalLocations != nil || node.ArchivalLocations != nil || node.ReplicationLocations != nil {
+		return "unknown"
 	}
 	return "rubrik"
 }
