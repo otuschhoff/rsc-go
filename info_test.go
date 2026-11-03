@@ -2,6 +2,7 @@ package rsc
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,137 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNodeStats(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		requests++
+		if !strings.Contains(payload.Query, "clusterNodeStats(timeRange: $timeRange") || !strings.Contains(payload.Query, "diskUtilBasisPoints loadAvg5MinMilli") {
+			t.Errorf("unexpected query: %s", payload.Query)
+		}
+		if payload.Variables["aggregation"] != "MAX" || payload.Variables["nodeID"] != `node-"1` {
+			t.Errorf("unexpected variables: %#v", payload.Variables)
+		}
+		period, ok := payload.Variables["timeRange"].(map[string]any)
+		if !ok || period["start"] != "2026-11-03T10:00:00Z" || period["end"] != "2026-11-03T11:00:00Z" {
+			t.Errorf("unexpected time range: %#v", period)
+		}
+		if requests == 1 {
+			if payload.Variables["after"] != nil {
+				t.Error("first page must not have a cursor")
+			}
+			_, _ = writer.Write([]byte(`{"data":{"clusterConnection":{"nodes":[{"id":"cluster-1","name":"lab","clusterNodeStats":[{"clusterId":"cluster-1","nodeId":"node-1","time":"2026-11-03T10:30:00Z","cpuStat":42,"usedMemoryStat":75,"iopsReadsPerSecond":0,"iopsWritesPerSecond":12,"readThroughputBytesPerSecond":1048576,"writeThroughputBytesPerSecond":2048,"diskUtilBasisPoints":2500,"loadAvg5MinMilli":1500},{"nodeId":"node-2","cpuStat":null}]}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}`))
+			return
+		}
+		if payload.Variables["after"] != "next" {
+			t.Errorf("unexpected cursor: %#v", payload.Variables["after"])
+		}
+		_, _ = writer.Write([]byte(`{"data":{"clusterConnection":{"nodes":[{"id":"cluster-2","name":"empty","clusterNodeStats":[]}],"pageInfo":{"hasNextPage":false}}}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.FixedZone("fixture", 2*60*60))
+	stats, err := client.NodeStats(context.Background(), "lab*", NodeStatsOptions{
+		Start: start, End: start.Add(time.Hour), Aggregation: "MAX", NodeID: `node-"1`, IncludeExtended: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || len(stats) != 2 || len(stats[0].Samples) != 2 || len(stats[1].Samples) != 0 {
+		t.Fatalf("unexpected pages/samples: %d %#v", requests, stats)
+	}
+	sample := stats[0].Samples[0]
+	if sample.CPUStat == nil || *sample.CPUStat != 42 || sample.UsedMemoryPercent == nil || *sample.UsedMemoryPercent != 75 ||
+		sample.IOPSReadsPerSecond == nil || *sample.IOPSReadsPerSecond != 0 || sample.IOPSWritesPerSecond == nil || *sample.IOPSWritesPerSecond != 12 ||
+		sample.ReadThroughputBytesPerSecond == nil || *sample.ReadThroughputBytesPerSecond != 1048576 || sample.WriteThroughputBytesPerSecond == nil || *sample.WriteThroughputBytesPerSecond != 2048 ||
+		sample.DiskUtilBasisPoints == nil || *sample.DiskUtilBasisPoints != 2500 || sample.LoadAvg5MinMilli == nil || *sample.LoadAvg5MinMilli != 1500 ||
+		sample.NodeID != "node-1" || sample.ClusterID != "cluster-1" || sample.Time != "2026-11-03T10:30:00Z" {
+		t.Fatalf("unexpected metrics: %+v", sample)
+	}
+	if stats[0].Samples[1].CPUStat != nil || stats[0].Samples[1].UsedMemoryPercent != nil {
+		t.Fatal("missing/null metrics must not become zero load")
+	}
+}
+
+func TestNodeStatsFailures(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		body   string
+		status int
+		want   string
+	}{
+		{name: "GraphQL", body: `{"errors":[{"message":"not authorized"}],"data":{"clusterConnection":{"nodes":[{"id":"partial"}]}}}`, want: "not authorized"},
+		{name: "no clusters", body: `{"data":{"clusterConnection":{"nodes":[]}}}`, want: "returned no clusters"},
+		{name: "invalid JSON", body: `{`, want: "unexpected end of JSON input"},
+		{name: "missing cursor", body: `{"data":{"clusterConnection":{"pageInfo":{"hasNextPage":true}}}}`, want: "pagination did not advance"},
+		{name: "repeated cursor", body: `{"data":{"clusterConnection":{"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}`, want: "pagination did not advance"},
+		{name: "HTTP failure", body: `{"message":"unavailable"}`, status: http.StatusServiceUnavailable, want: "503"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				requests++
+				writer.Header().Set("Content-Type", "application/json")
+				var payload struct {
+					Query     string         `json:"query"`
+					Variables map[string]any `json:"variables"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				if strings.Contains(payload.Query, "diskUtilBasisPoints") || strings.Contains(payload.Query, "loadAvg5MinMilli") {
+					t.Error("extended metrics must be opt-in")
+				}
+				for _, key := range []string{"timeRange", "aggregation", "nodeID"} {
+					if payload.Variables[key] != nil {
+						t.Errorf("default %s = %#v, want null", key, payload.Variables[key])
+					}
+				}
+				if test.status != 0 {
+					writer.WriteHeader(test.status)
+				}
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			stats, err := FetchNodeStatsForCluster(context.Background(), server.Client(), server.URL, "", NodeStatsOptions{})
+			if err == nil || !strings.Contains(err.Error(), test.want) || stats != nil {
+				t.Fatalf("result/error = %#v/%v, want nil/%q", stats, err, test.want)
+			}
+			wantRequests := 1
+			if test.name == "repeated cursor" {
+				wantRequests = 2
+			}
+			if requests != wantRequests {
+				t.Errorf("requests = %d, want %d", requests, wantRequests)
+			}
+		})
+	}
+}
+
+func TestNodeStatsInvalidOptions(t *testing.T) {
+	start := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	for _, options := range []NodeStatsOptions{
+		{Start: start}, {End: start}, {Start: start, End: start},
+		{Start: start, End: start.Add(-time.Hour)}, {Aggregation: "SUM"},
+	} {
+		stats, err := FetchNodeStatsForCluster(context.Background(), nil, "", "", options)
+		if err == nil || stats != nil {
+			t.Fatalf("invalid options %+v returned %#v/%v", options, stats, err)
+		}
+	}
+}
 
 func TestNormalizeRSCGraphQLEndpoint(t *testing.T) {
 	if got := NormalizeGraphQLEndpoint("https://tenant.my.rubrik.com"); got != "https://tenant.my.rubrik.com/api/graphql" {

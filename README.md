@@ -4,6 +4,8 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
+Current release: `v0.1.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
 authentication. Custom query selections are retained where prepared SDK
@@ -89,6 +91,40 @@ The library does not save files, create directories, discover CDOT objects,
 manage Git, or maintain a singleton/global cache. Per-request user-agent and
 logging hooks are available through `WithRequestOptions`.
 
+## Cluster member load
+
+`Client.NodeStats(ctx, clusterFilter, options)` and
+`FetchNodeStatsForCluster` retrieve RSC's `Cluster.clusterNodeStats` without
+changing existing health or configuration reads. Results contain cluster identity
+and timestamped samples keyed by node ID. Multiple samples per node can be
+returned; these are RSC observations, not a direct, live poll of each member.
+
+```go
+end := time.Now().UTC()
+stats, err := client.NodeStats(ctx, "lab*", rsc.NodeStatsOptions{
+    Start:       end.Add(-15 * time.Minute),
+    End:         end,
+    Aggregation: "AVERAGE",
+})
+```
+
+Options accept a paired start/end range, `AVERAGE`, `MAX`, or `UNDEFINED`
+aggregation, and an optional `NodeID`. Zero options leave the range, aggregation,
+and node selection to the API defaults. Cluster results are paginated.
+
+Samples expose `CPUStat` (raw API CPU utilization; the public reference does not
+specify its scale), `UsedMemoryPercent` (RAM used, percent), read/write IOPS
+(operations/second), and read/write throughput (bytes/second). Metric pointers
+distinguish missing/null values from zero. Set `IncludeExtended: true` to also
+request disk utilization in basis points (divide by 100 for percent) and the
+five-minute load average in thousandths (divide by 1000). Those newer fields
+are opt-in to avoid requiring them on older tenant schemas. A tenant lacking
+the operation or a requested field returns a GraphQL error, not fabricated zeros
+or a silent fallback. No direct CDM credentials or transport are added.
+
+Schema contracts: [Cluster](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/Cluster/)
+and [ClusterNodeStats](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/ClusterNodeStats/).
+
 ## Local development and SDK fork
 
 `FilesetInventory(ctx, InventoryLimits{MaxPages: 30, MaxObjects: 10000})` is an
@@ -109,10 +145,10 @@ This module is published at https://github.com/otuschhoff/rsc-go. It includes a 
 [third_party/rubrik-polaris-sdk-for-go](third_party/rubrik-polaris-sdk-for-go).
 See [SDK_FORK.md](SDK_FORK.md) for the base revision, exact extension and upgrade
 procedure. Go does not propagate dependency `replace` directives. Consumers must
-explicitly replace the SDK with the nested module published at the same commit:
+explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.0.0-20261102173521-d9afd9c9fb40
+require github.com/otuschhoff/rsc-go v0.1.0
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```
@@ -131,6 +167,6 @@ go test -race ./pkg/polaris/graphql ./pkg/polaris/token -count=1 -timeout=3m
 ```
 
 The root test command does not traverse nested modules. Tests use synthetic
-credentials and local/fake transports, not live RSC. A runnable monitoring daemon,
-tagged release and upstream contribution remain separate follow-up
+credentials and local/fake transports, not live RSC. A runnable monitoring daemon
+and upstream contribution remain separate follow-up
 work; no daemon is installed by this library.
