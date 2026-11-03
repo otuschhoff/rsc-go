@@ -17,6 +17,327 @@ const monitoringFixtureCluster = "00000000-0000-4000-8000-000000000002"
 const monitoringFixtureSeries = "00000000-0000-4000-8000-000000000003"
 const monitoringFixtureTaskchain = "00000000-0000-4000-8000-000000000010"
 
+func TestActiveBackupActivityReadFailuresAndBounds(t *testing.T) {
+	for _, scenario := range []string{"empty", "missing connection", "missing nodes", "missing page info", "missing page status", "missing time", "missing bytes",
+		"null row", "out of scope", "duplicate", "unknown state", "terminal state", "missing cursor", "long cursor", "cycle", "page limit", "result limit", "oversize", "malformed", "denied", "transport", "canceled", "deadline"} {
+		t.Run(scenario, func(t *testing.T) {
+			options := BackupActiveActivityReadOptions{Scope: monitoringFixtureOptions().Scope, Statuses: []string{"RUNNING"}, Limits: monitoringFixtureOptions().Limits}
+			if scenario == "page limit" {
+				options.Limits.MaxPages = 1
+			}
+			if scenario == "result limit" {
+				options.Limits.MaxResults = 1
+			}
+			if scenario == "deadline" {
+				options.Limits.MaxDuration = time.Millisecond
+			}
+			ctx := WithRequestOptions(t.Context(), RequestOptions{UserAgent: "active-fixture/1", Logf: func(int, string, ...any) { t.Error("source error logged") }})
+			if scenario == "canceled" {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = canceled
+			}
+			requests := 0
+			authorityErr := errors.New("private-active-fixture")
+			client := &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
+				requests++
+				if req.URL.Host != "fixture.invalid" || req.Header.Get("User-Agent") != "active-fixture/1" || req.Header.Get("Authorization") != "" {
+					t.Error("request authority/config changed")
+				}
+				if scenario == "transport" {
+					return nil, authorityErr
+				}
+				if scenario == "deadline" {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}
+				row := monitoringFixtureRow()
+				rows, more, cursor := []any{row}, false, any(nil)
+				switch scenario {
+				case "empty":
+					rows = []any{}
+				case "missing time":
+					delete(row, "lastUpdated")
+				case "missing bytes":
+					delete(row, "dataTransferred")
+				case "null row":
+					rows = []any{nil}
+				case "out of scope":
+					row["fid"] = monitoringFixtureSeries
+				case "duplicate":
+					rows = append(rows, row)
+				case "unknown state":
+					row["lastActivityStatus"] = "NEW_STATE"
+				case "terminal state":
+					row["lastActivityStatus"] = "Canceled"
+				case "missing cursor":
+					more = true
+				case "long cursor":
+					more, cursor = true, strings.Repeat("x", 4097)
+				case "cycle":
+					row["activitySeriesId"] = []string{monitoringFixtureSeries, monitoringFixtureTaskchain}[requests-1]
+					more, cursor = true, "same"
+				case "page limit":
+					more, cursor = true, "next"
+				case "result limit":
+					other := monitoringFixtureRow()
+					other["activitySeriesId"] = monitoringFixtureTaskchain
+					rows = append(rows, other)
+				}
+				response := monitoringFixtureConnection(rows, more, cursor)
+				connection := response["data"].(map[string]any)["activitySeriesConnection"].(map[string]any)
+				switch scenario {
+				case "missing connection":
+					delete(response["data"].(map[string]any), "activitySeriesConnection")
+				case "missing nodes":
+					delete(connection, "nodes")
+				case "missing page info":
+					delete(connection, "pageInfo")
+				case "missing page status":
+					delete(connection["pageInfo"].(map[string]any), "hasNextPage")
+				}
+				body, _ := json.Marshal(response)
+				status := 200
+				if scenario == "oversize" {
+					body = append(body, []byte(strings.Repeat(" ", 4<<20))...)
+				}
+				if scenario == "malformed" {
+					body = []byte("{")
+				}
+				if scenario == "denied" {
+					status = 403
+					body = []byte(`{"message":"private-active-fixture"}`)
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+			})}
+			read, err := ReadActiveBackupActivityObservations(ctx, client, "https://fixture.invalid/api/graphql", options)
+			if scenario == "empty" {
+				if err != nil || !read.Complete || read.Observations == nil || read.Results != 0 {
+					t.Fatal("complete empty candidates not distinguished")
+				}
+				return
+			}
+			if err == nil || read.Complete || read.Observations != nil || strings.Contains(err.Error(), "private-") {
+				t.Fatal("failure returned partial or unsanitized source evidence")
+			}
+			if scenario == "transport" && !errors.Is(err, authorityErr) {
+				t.Fatal("authority error identity lost")
+			}
+			if scenario == "denied" && !errors.Is(err, ErrBackupMonitoringDenied) {
+				t.Fatal("denial error identity lost")
+			}
+			if scenario == "canceled" && !errors.Is(err, context.Canceled) {
+				t.Fatal("cancellation error identity lost")
+			}
+			if scenario == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("deadline error identity lost")
+			}
+			if scenario == "page limit" || scenario == "result limit" || scenario == "oversize" {
+				if !errors.Is(err, ErrBackupMonitoringLimit) {
+					t.Fatal("limit error identity lost")
+				}
+			}
+			if scenario == "cycle" {
+				if requests != 2 {
+					t.Fatal("unbounded cursor cycle")
+				}
+			} else if scenario == "canceled" {
+				if requests != 0 {
+					t.Fatal("canceled read reached network")
+				}
+			} else if requests != 1 {
+				t.Fatal("extra request/retry/enrichment")
+			}
+		})
+	}
+}
+
+func TestActiveBackupActivityInvalidOptions(t *testing.T) {
+	for _, scenario := range []string{"no scope", "invalid scope", "scope count", "empty statuses", "status count", "terminal status", "unknown status", "duplicate status", "duration", "pages", "results", "page size"} {
+		t.Run(scenario, func(t *testing.T) {
+			options := BackupActiveActivityReadOptions{Scope: monitoringFixtureOptions().Scope, Statuses: []string{"RUNNING"}, Limits: monitoringFixtureOptions().Limits}
+			switch scenario {
+			case "no scope":
+				options.Scope = BackupActivityScope{}
+			case "invalid scope":
+				options.Scope.ClusterIDs = []string{"display-name"}
+			case "scope count":
+				options.Scope.WorkloadIDs = make([]string, 101)
+			case "empty statuses":
+				options.Statuses = nil
+			case "status count":
+				options.Statuses = []string{"RUNNING", "QUEUED", "CANCELING", "SUCCESS"}
+			case "terminal status":
+				options.Statuses = []string{"CANCELED"}
+			case "unknown status":
+				options.Statuses = []string{"NEW_STATE"}
+			case "duplicate status":
+				options.Statuses = []string{"RUNNING", "RUNNING"}
+			case "duration":
+				options.Limits.MaxDuration = 2 * time.Minute
+			case "pages":
+				options.Limits.MaxPages = 101
+			case "results":
+				options.Limits.MaxResults = 10001
+			case "page size":
+				options.Limits.PageSize = 101
+			}
+			client := &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) { t.Fatal("invalid read reached network"); return nil, nil })}
+			read, err := ReadActiveBackupActivityObservations(t.Context(), client, "https://fixture.invalid/api/graphql", options)
+			if !errors.Is(err, ErrBackupMonitoringOptions) || read.Complete {
+				t.Fatal("invalid active selection accepted")
+			}
+		})
+	}
+}
+
+func TestActiveBackupActivityRevisionsAndChildLifecycle(t *testing.T) {
+	requests := 0
+	client := &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
+		requests++
+		row := monitoringFixtureRow()
+		if requests >= 2 {
+			row["dataTransferred"], row["attemptNumber"] = 40, 2
+		}
+		if requests >= 4 {
+			row["lastUpdated"] = "2026-11-03T10:40:00Z"
+		}
+		body, _ := json.Marshal(monitoringFixtureConnection([]any{row}, false, nil))
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+	})}
+	options := BackupActiveActivityReadOptions{Scope: monitoringFixtureOptions().Scope, Statuses: []string{"RUNNING"}, Limits: monitoringFixtureOptions().Limits}
+	var observations []BackupActivityObservation
+	for range 4 {
+		read, err := ReadActiveBackupActivityObservations(t.Context(), client, "https://fixture.invalid/api/graphql", options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observations = append(observations, read.Observations[0])
+	}
+	if observations[0].RevisionFingerprint() == observations[1].RevisionFingerprint() || observations[1].RevisionFingerprint() != observations[2].RevisionFingerprint() || observations[2].RevisionFingerprint() == observations[3].RevisionFingerprint() {
+		t.Fatal("retry/replay/late update conflated")
+	}
+	if value, known := observations[0].DataTransferred(); !known || value != 100 {
+		t.Fatal("immutable earlier source value changed")
+	}
+	if observations[1].DataTransferredContract().CumulativeDeltaSupported {
+		t.Fatal("decrease or attempt became a delta baseline")
+	}
+	windowed, err := ReadBackupActivityObservations(t.Context(), client, "https://fixture.invalid/api/graphql", monitoringFixtureOptions())
+	if err != nil || windowed.Observations[0].RevisionFingerprint() != observations[3].RevisionFingerprint() {
+		t.Fatal("existing fingerprint contract changed for identical source values")
+	}
+	terminalIDs := make(map[string]bool)
+	var firstTerminalFingerprint string
+	for index, state := range []string{"RUNNING", "CANCELING", "CANCELED", "CANCELED", "FUTURE_STATE"} {
+		childClient := &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
+			var end any
+			if state == "CANCELED" {
+				end = "2026-11-03T10:05:00Z"
+			}
+			if index == 3 {
+				end = "2026-11-03T10:06:00Z"
+			}
+			body, _ := json.Marshal(map[string]any{"data": map[string]any{"taskchain": map[string]any{
+				"taskchainUuid": monitoringFixtureTaskchain, "state": state, "parentTaskchainId": monitoringFixtureSeries,
+				"jobType": "opaque-child-type", "startTime": "2026-11-03T10:00:00Z", "endTime": end,
+				"progressedAt": nil, "currentTaskExecutionAttempts": 2}}})
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+		})}
+		read, err := ReadKnownBackupTaskchains(t.Context(), childClient, "https://fixture.invalid/api/graphql", BackupTaskchainReadOptions{TaskchainIDs: []string{monitoringFixtureTaskchain}, MaxRequests: 1, MaxDuration: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := read.Observations[0]
+		if terminal, known := child.Terminal(); terminal != (state == "CANCELED") || known != (state != "FUTURE_STATE") {
+			t.Fatal("child cancellation state reinterpreted")
+		}
+		if _, known := child.EndTime(); known != (state == "CANCELED") {
+			t.Fatal("child end boundary invented")
+		}
+		if parent, known := child.ParentTaskchainID(); !known || parent != monitoringFixtureSeries {
+			t.Fatal("raw parent changed")
+		}
+		if state == "CANCELED" {
+			terminalIDs[child.TaskchainID()] = true
+			if index == 2 {
+				firstTerminalFingerprint = child.RevisionFingerprint()
+			}
+			if index == 3 && child.RevisionFingerprint() == firstTerminalFingerprint {
+				t.Fatal("late child end-time correction lost")
+			}
+			if value, known := child.ElapsedDuration(); !known || value != time.Duration(index+3)*time.Minute {
+				t.Fatal("child elapsed boundary correction reinterpreted")
+			}
+		}
+		if BackupActiveActivitySourceCapabilities().RootTaskchainBinding || BackupTaskReportSourceCapabilities().RootTaskchainBinding {
+			t.Fatal("child/report promoted into backup root")
+		}
+	}
+	if len(terminalIDs) != 1 {
+		t.Fatal("late child revision became another job-instance completion")
+	}
+}
+
+func TestActiveBackupActivityObservationsWithoutTimeWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		filters := payload.Variables["filters"].(map[string]any)
+		if len(filters) != 4 || filters["objectFid"].([]any)[0] != monitoringFixtureWorkload ||
+			filters["clusterId"].([]any)[0] != monitoringFixtureCluster || filters["lastActivityType"].([]any)[0] != "BACKUP" {
+			t.Error("scope broadened or unsupported/time filters added")
+		}
+		rows := []any{}
+		for index, status := range []string{"Running", "Queued", "Canceling"} {
+			row := monitoringFixtureRow()
+			row["activitySeriesId"] = []string{monitoringFixtureSeries, monitoringFixtureTaskchain, "00000000-0000-4000-8000-000000000011"}[index]
+			row["lastActivityStatus"], row["startTime"], row["lastUpdated"] = status, nil, "2020-01-01T00:00:00Z"
+			row["dataTransferred"] = nil
+			if index == 0 {
+				row["dataTransferred"] = 0
+			}
+			rows = append(rows, row)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(monitoringFixtureConnection(rows, false, nil))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := BackupActiveActivityReadOptions{Scope: monitoringFixtureOptions().Scope, Statuses: []string{"RUNNING", "QUEUED", "CANCELING"},
+		Limits: BackupActivityReadLimits{PageSize: 3, MaxPages: 2, MaxResults: 3, MaxDuration: time.Second}}
+	read, err := client.ReadActiveBackupActivityObservations(t.Context(), options)
+	if err != nil || !read.Complete || read.Atomic || read.CompleteEventHistory || read.Results != 3 || read.ScannedResults != 3 {
+		t.Fatalf("windowless candidates: %v", err)
+	}
+	for index, observation := range read.Observations {
+		if _, known := observation.StartTime(); known {
+			t.Fatal("no-end queued candidate assigned lifecycle boundaries")
+		}
+		if value, known := observation.DataTransferred(); known != (index == 0) || (known && value != 0) {
+			t.Fatal("null/zero counter changed")
+		}
+		if observation.WorkloadID() != monitoringFixtureWorkload {
+			t.Fatal("concurrent same-workload series lost")
+		}
+	}
+	if BackupActiveActivitySourceCapabilities() != (BackupActiveActivityCapabilities{TimeUnrestrictedSeriesCandidates: true, ExactSourceScope: true}) {
+		t.Fatal("candidate series promoted into execution/root/history/counter guarantees")
+	}
+	options.Scope.WorkloadIDs[0], options.Statuses[0] = monitoringFixtureCluster, "changed"
+	if read.Scope.WorkloadIDs[0] != monitoringFixtureWorkload || read.SourceScope.WorkloadIDs[0] != monitoringFixtureWorkload || read.Statuses[0] != "RUNNING" {
+		t.Fatal("options mutated coverage metadata")
+	}
+}
+
 func monitoringTaskReportFixtureOptions() BackupTaskReportReadOptions {
 	baseline := monitoringFixtureOptions()
 	return BackupTaskReportReadOptions{Scope: baseline.Scope, Start: baseline.Window.Start, End: baseline.Window.End,

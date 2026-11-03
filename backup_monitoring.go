@@ -266,6 +266,72 @@ func (client *Client) ReadBackupActivityObservations(ctx context.Context, option
 }
 
 func ReadBackupActivityObservations(ctx context.Context, client *http.Client, endpoint string, options BackupActivityReadOptions) (BackupActivityRead, error) {
+	return readBackupActivityObservations(ctx, client, endpoint, options, false)
+}
+
+type BackupActiveActivityReadOptions struct {
+	Scope    BackupActivityScope
+	Statuses []string
+	Limits   BackupActivityReadLimits
+}
+
+type BackupActiveActivityCapabilities struct {
+	TimeUnrestrictedSeriesCandidates bool
+	ExactSourceScope                 bool
+	ScheduledOnlyDiscovery           bool
+	ExecutionIdentity                bool
+	RootTaskchainBinding             bool
+	WholeRunStatus                   bool
+	CompletionTime                   bool
+	RetryIdentity                    bool
+	CumulativeByteCounter            bool
+	TransferPhaseDuration            bool
+	AtomicEnumeration                bool
+	CompleteEventHistory             bool
+}
+
+func BackupActiveActivitySourceCapabilities() BackupActiveActivityCapabilities {
+	return BackupActiveActivityCapabilities{TimeUnrestrictedSeriesCandidates: true, ExactSourceScope: true}
+}
+
+type BackupActiveActivityRead struct {
+	Scope                BackupActivityScope
+	SourceScope          BackupActivityScope
+	Statuses             []string
+	Observations         []BackupActivityObservation
+	Complete             bool
+	Atomic               bool
+	CompleteEventHistory bool
+	Pages                int
+	ScannedResults       int
+	Results              int
+	ResponseBytes        int
+	Continuation         string
+	CollectionStartedAt  time.Time
+	CollectionFinishedAt time.Time
+}
+
+func (client *Client) ReadActiveBackupActivityObservations(ctx context.Context, options BackupActiveActivityReadOptions) (BackupActiveActivityRead, error) {
+	return ReadActiveBackupActivityObservations(ctx, client.httpClient, client.endpoint, options)
+}
+
+func ReadActiveBackupActivityObservations(ctx context.Context, client *http.Client, endpoint string, options BackupActiveActivityReadOptions) (BackupActiveActivityRead, error) {
+	if len(options.Statuses) < 1 || len(options.Statuses) > 3 {
+		return BackupActiveActivityRead{}, backupMonitoringFailure(ErrBackupMonitoringOptions, nil)
+	}
+	read, err := readBackupActivityObservations(ctx, client, endpoint,
+		BackupActivityReadOptions{Scope: options.Scope, Statuses: options.Statuses, Limits: options.Limits}, true)
+	return BackupActiveActivityRead{
+		Scope:       read.Scope,
+		SourceScope: BackupActivityScope{WorkloadIDs: append([]string(nil), read.Scope.WorkloadIDs...), ClusterIDs: append([]string(nil), read.Scope.ClusterIDs...)},
+		Statuses:    append([]string(nil), options.Statuses...), Observations: read.Observations,
+		Complete: read.Complete, Pages: read.Pages, ScannedResults: read.Results, Results: read.Results,
+		ResponseBytes: read.ResponseBytes, Continuation: read.Continuation,
+		CollectionStartedAt: read.CollectionStartedAt, CollectionFinishedAt: read.CollectionFinishedAt,
+	}, err
+}
+
+func readBackupActivityObservations(ctx context.Context, client *http.Client, endpoint string, options BackupActivityReadOptions, active bool) (BackupActivityRead, error) {
 	read := BackupActivityRead{Window: options.Window}
 	fail := func(code BackupMonitoringErrorCode, cause error) (BackupActivityRead, error) {
 		read.Observations = nil
@@ -281,15 +347,19 @@ func ReadBackupActivityObservations(ctx context.Context, client *http.Client, en
 	limits, window := options.Limits, options.Window
 	_, startOffset := window.Start.Zone()
 	_, endOffset := window.End.Zone()
+	invalidWindow := window.Start.IsZero() || window.End.IsZero() || !window.Start.Before(window.End) || startOffset != 0 || endOffset != 0 ||
+		(window.Field != BackupActivityUpdatedTime && window.Field != BackupActivityStartTime)
 	if ctx == nil || client == nil || !validWorkloads || !validClusters || len(workloads)+len(clusters) == 0 ||
-		window.Start.IsZero() || window.End.IsZero() || !window.Start.Before(window.End) || startOffset != 0 || endOffset != 0 ||
-		(window.Field != BackupActivityUpdatedTime && window.Field != BackupActivityStartTime) ||
+		(!active && invalidWindow) || (active && len(options.Statuses) == 0) ||
 		limits.PageSize < 1 || limits.PageSize > 100 || limits.MaxPages < 1 || limits.MaxPages > 100 ||
 		limits.MaxResults < 1 || limits.MaxResults > 10000 || limits.MaxDuration <= 0 || limits.MaxDuration > time.Minute {
 		return fail(ErrBackupMonitoringOptions, nil)
 	}
 	statuses := make(map[string]bool)
 	for _, status := range options.Statuses {
+		if active && status != "RUNNING" && status != "QUEUED" && status != "CANCELING" {
+			return fail(ErrBackupMonitoringOptions, nil)
+		}
 		switch status {
 		case "RUNNING", "QUEUED", "SUCCESS", "FAILURE", "CANCELED", "CANCELING", "INFO", "WARNING", "TASK_SUCCESS", "TASK_FAILURE", "PARTIAL_SUCCESS", "UNKNOWN_EVENT_STATUS":
 		default:
@@ -317,8 +387,10 @@ func ReadBackupActivityObservations(ctx context.Context, client *http.Client, en
 	if window.Field == BackupActivityStartTime {
 		prefix = "startTime"
 	}
-	filters[prefix+"Gt"] = window.Start.UTC().Format(time.RFC3339Nano)
-	filters[prefix+"Lt"] = window.End.UTC().Format(time.RFC3339Nano)
+	if !active {
+		filters[prefix+"Gt"] = window.Start.UTC().Format(time.RFC3339Nano)
+		filters[prefix+"Lt"] = window.End.UTC().Format(time.RFC3339Nano)
+	}
 	const query = `query RSCBackupActivityObservations($first: Int!, $after: String, $filters: ActivitySeriesFilter) {
 		activitySeriesConnection(first: $first, after: $after, filters: $filters) {
 			nodes { activitySeriesId fid clusterUuid lastActivityType lastActivityStatus startTime lastUpdated
@@ -395,7 +467,7 @@ func ReadBackupActivityObservations(ctx context.Context, client *http.Client, en
 			if window.Field == BackupActivityStartTime {
 				sourceTime = source.StartTime
 			}
-			if !sourceTime.known || !sourceTime.value.After(window.Start) || !sourceTime.value.Before(window.End) {
+			if !active && (!sourceTime.known || !sourceTime.value.After(window.Start) || !sourceTime.value.Before(window.End)) {
 				return fail(ErrBackupMonitoringIncomplete, nil)
 			}
 			if read.Results >= limits.MaxResults {

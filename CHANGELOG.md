@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.0 - 2026-11-03
+
+- Add bounded `ReadActiveBackupActivityObservations` for exact-scoped backup
+  series candidates in explicit running/queued/canceling latest-activity states,
+  without time cutoffs or requiring an end time. Reuse the existing SDK reader,
+  immutable nullable observations, fingerprints and no-partial-result safeguards.
+- Expose copied source/output scopes, status selection, row/page/byte counts and
+  non-atomic completeness metadata; keep scheduled execution/root identity,
+  whole-backup status/history and transfer-counter/duration guarantees unsupported.
+- Preserve mandatory UTC windows for existing activity reads and all v0.4.0
+  public structs, query selections and source semantics. Add no enrichment,
+  credentials, caches, polling, persistence or consumer/deployment changes.
+- Extend fixtures for old/no-end candidates, concurrency, null/zero bytes,
+  scope/status mismatches, limits/cursors, denied reads, cancellation/deadlines,
+  retry-like decreases/replay, unchanged cross-API fingerprints, and late child
+  terminal-boundary corrections without backup-root promotion.
+- Document how active candidates, windowed updates, known taskchain lifecycle and
+  task reports differ, with source evidence, capability matrix and remaining
+  whole-execution verification steps. Live tenant support remains unverified.
+
 ## v0.4.0 - 2026-11-03
 
 - Add bounded SDK-backed Protection task-report reads with explicit cluster

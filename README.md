@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.4.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.5.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -402,6 +402,106 @@ References: [ActivitySeries](https://developer.rubrik.com/Rubrik-Security-Cloud-
 [TaskchainState](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/enums/TaskchainState/),
 and [TakeOnDemandSnapshotTaskchainUuid](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/types/objects/TakeOnDemandSnapshotTaskchainUuid/).
 
+### Active-series candidates without a time cutoff
+
+`Client.ReadActiveBackupActivityObservations` / `ReadActiveBackupActivityObservations`
+add the missing time-unrestricted candidate scan through the existing bounded
+SDK activity reader. The documented `ActivitySeriesFilter` time fields are
+optional. This operation selects `BACKUP` and explicit `RUNNING`, `QUEUED`, and/or
+`CANCELING` latest-activity states without a start/update/end-time cutoff.
+Old queued/running series are therefore not excluded solely by their age, and
+no end time is required. This is **active-series evidence, not authoritative
+whole-backup execution discovery**. It can include stale series, child activity,
+on-demand backups and SLA-driven backups; no scheduled-only flag or undocumented
+filter/identity join is manufactured.
+
+```go
+candidates, err := client.ReadActiveBackupActivityObservations(ctx, rsc.BackupActiveActivityReadOptions{
+        Scope: rsc.BackupActivityScope{
+                WorkloadIDs: []string{workloadID},
+                ClusterIDs:  []string{clusterID},
+        },
+        Statuses: []string{"RUNNING", "QUEUED", "CANCELING"},
+        Limits: rsc.BackupActivityReadLimits{
+                PageSize: 100, MaxPages: 10, MaxResults: 1000,
+                MaxDuration: 30 * time.Second,
+        },
+})
+```
+
+Require a nonempty exact workload and/or cluster UUID scope (1-100 unique IDs
+per kind), with intersection when both are supplied. Require 1-3 unique documented
+active status filters; terminal/unknown filter values are invalid options.
+These are `EventStatus` input spellings; observations retain raw output values
+such as `Running` and `Canceling`. A returned terminal/unknown/out-of-filter
+status fails the read as mutable-source inconsistency, not silently skipped
+completion evidence. Use the existing windowed reader with no status filter to
+retain raw terminal and future states in series-update observations.
+
+`Scope` is the output selection and `SourceScope` is the identical exact
+server-side predicate; there is no local scope expansion/filtering or enrichment.
+`Statuses` records the selected filters. `ScannedResults` and `Results` count
+validated source rows (equal on successful reads); failed-read counts remain
+diagnostic, not partial observations. Both scopes and selectors are copied.
+All original explicit limits apply: 1-100 entries/page, 1-100 pages, 1-10000 rows,
+duration greater than zero and at most one minute, 4 MiB per response, 4096-byte
+cursors, one SDK attempt per page, and shorter caller deadlines. Missing selected
+fields, invalid/out-of-scope IDs, duplicates, inconsistent statuses, cursor
+faults, denied access and exceeded bounds return nil observations and
+`Complete == false`. No continuation is a safe reconciliation checkpoint.
+
+Accept observations only when `err == nil && candidates.Complete`; empty success
+is a non-nil slice. `Complete` means the selected mutable connection drained
+within budgets, not that the source has every active execution. `Atomic` and
+`CompleteEventHistory` remain false. Scope permissions, late changes, retention,
+source verification lag, unknown timestamps and disappearing series can prevent
+complete coverage. Never infer completion or cancellation from disappearance,
+staleness, an empty result, or a failed/denied read.
+
+The observations are the existing immutable `BackupActivityObservation` values,
+with unchanged getters and fingerprints for identical source values. Null is
+unknown, genuine zero is known, and local receipt is not source freshness.
+`LastUpdated` is a series update timestamp, not completion or a verified transfer
+counter observation clock. Counter mode, execution/attempt epochs, finalization,
+reset behavior, compression and logical/physical/on-wire interpretation remain
+unverified; `DataTransferredContract().CumulativeDeltaSupported` remains false.
+No transfer-phase or active-transfer duration is inferred from source boundaries.
+
+`BackupActiveActivitySourceCapabilities()` guarantees only time-unrestricted
+series candidates and exact source scope. It keeps scheduled-only discovery,
+execution/retry identity, root binding, whole-run status/completion, cumulative
+counters, transfer duration, atomic enumeration and complete history false.
+The original windowed API still requires explicit UTC windows; no v0.4.0 public
+struct, field selection, fingerprint contract, report semantics or taskchain
+lookup is broadened into whole-execution monitoring.
+
+Consumer reconciliation remains three distinct source reads:
+
+- Use this scan for **current source-status candidates**, labeled as series and
+    not execution counts. Keep source timestamps and local collection receipt
+    separate; an old `Running` series is not proof of a currently transferring run.
+- Use `ReadBackupActivityObservations` with overlapping exclusive UTC update
+    windows for terminal/unknown series updates and late revisions. Persist raw
+    series UUID plus fingerprint as source evidence, not an execution completion
+    key or ordered retained event stream. No guaranteed correction/retention horizon
+    or automatic checkpoint/backfill is supplied.
+- Use `ReadKnownBackupTaskchains` for independently known instance IDs and
+    proven backup/root bindings. Retain terminal state and nullable source end time
+    by that instance, revising late evidence without another completion count.
+    `CANCELING` is not terminal `CANCELED`; cancellation-request acknowledgement is
+    separate. A child taskchain's end/state/parent does not certify its parent's
+    backup outcome. `ReadProtectionTaskReports` remains task-only end-time evidence,
+    never a fallback for active enumeration or fabricated root/series joins.
+
+Whole scheduled-backup state/history still needs a documented stable execution
+and retry identity, exact workload/cluster/series/root binding, whole-workflow
+state/boundary contract and source correction/retention guarantees. The reviewed
+schema exposes no such join: report IDs remain invisible columns and taskchain
+lookup requires a known ID. Obtain that documented contract from Rubrik before
+promoting capabilities, then validate it through explicitly authorized read-only
+tenant calls with sanitized aggregate evidence. No credentials were discovered,
+no backups initiated/canceled, and no live calls were made for this addition.
+
 ### Protection task reports beyond v0.3.0
 
 `Client.ReadProtectionTaskReports` / `ReadProtectionTaskReports` expose the
@@ -521,6 +621,7 @@ API has been proven incapable. Implementation behavior is fixture-verified;
 | Capability | Status | Evidence / boundary |
 | --- | --- | --- |
 | Scoped activity observations and known-taskchain lookup | Implemented / verified contract; fixture-only behavior | v0.3.0, ActivitySeries and Taskchain docs, SDK event/core operations. |
+| Time-unrestricted queued/running/canceling series candidates | Implemented / verified contract; fixture-only behavior, live-unverified | ActivitySeriesFilter has optional time predicates and exact UUID/status filters; not scheduled whole-execution discovery. |
 | Cluster-scoped Protection task enumeration and workload binding | Implemented / verified contract; fixture-only behavior | TaskDetailFilterInput.clusterUuid and TaskDetail.objectFid/clusterUuid; local workload intersection is explicit. |
 | Task end-time windows, boundaries, reported task byte totals | Implemented / verified contract; fixture-only behavior | TaskDetailFilterInput.time_gt/time_lt and TaskDetail startTime/endTime/dataTransferred. |
 | Tenant schema, allowed status/type values, permissions and workload coverage | Live-unverified | Synthetic SDK-backed fixtures do not certify a tenant. |
@@ -530,7 +631,7 @@ API has been proven incapable. Implementation behavior is fixture-verified;
 | Whole-backup start/finish and job elapsed | Source-unavailable for scheduled discovery | Task boundaries are task-scoped; independently bound known taskchains retain v0.3.0 elapsed-time support. |
 | Cumulative execution totals, rates, retry-safe deltas and compression | Source-unavailable | Total task bytes do not establish sample mode, attempt identity, reset, finalization, or physical transfer semantics. |
 | Transfer-phase elapsed and active transfer time | Source-unavailable | No transfer-phase boundaries/active-time field in reviewed typed sources. |
-| Atomic enumeration, complete event history, monotonic revision ordering | Source-unavailable | Mutable end-time pagination has no documented retention/version/snapshot guarantee. |
+| Atomic enumeration, complete event history, monotonic revision ordering | Source-unavailable | Mutable source pagination has no documented retention/version/snapshot guarantee. |
 
 ### Publication guarantees and next verification
 
@@ -653,7 +754,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.4.0
+require github.com/otuschhoff/rsc-go v0.5.0
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```
