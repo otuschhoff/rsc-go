@@ -3,12 +3,251 @@ package rsc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBackupJobLifecycle(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		var payload struct {
+			Query     string                     `json:"query"`
+			Variables map[string]json.RawMessage `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		switch {
+		case strings.Contains(payload.Query, "query RSCBackupJobs"):
+			var filters map[string]any
+			if err := json.Unmarshal(payload.Variables["filters"], &filters); err != nil {
+				t.Error(err)
+			}
+			if string(payload.Variables["first"]) != "10" || string(payload.Variables["after"]) != `"cursor-1"` || filters["searchTerm"] != `host-"one` ||
+				!strings.Contains(string(payload.Variables["filters"]), `"lastActivityType":["BACKUP"]`) ||
+				!strings.Contains(string(payload.Variables["filters"]), `"objectFid":["workload-1"]`) ||
+				!strings.Contains(string(payload.Variables["filters"]), `"clusterId":["cluster-1"]`) ||
+				!strings.Contains(string(payload.Variables["filters"]), `"lastActivityStatus":["RUNNING"]`) {
+				t.Errorf("unexpected listing variables: %#v", payload.Variables)
+			}
+			_, _ = writer.Write([]byte(`{"data":{"activitySeriesConnection":{"nodes":[{"activitySeriesId":"activity-1","clusterUuid":"cluster-1","clusterName":"lab","fid":"workload-1","objectId":"cdm-object","objectName":"host-one","objectType":"Fileset","lastActivityStatus":"Running","progress":"25%","startTime":null,"lastUpdated":"2026-11-03T10:00:00Z","isCancelable":true,"isOnDemand":false}],"pageInfo":{"endCursor":"cursor-2","hasNextPage":true}}}}`))
+		case strings.Contains(payload.Query, "mutation RSCStartBackup"):
+			var input StartBackupInput
+			if err := json.Unmarshal(payload.Variables["input"], &input); err != nil {
+				t.Error(err)
+			}
+			if len(input.WorkloadIDs) != 1 || input.WorkloadIDs[0] != "workload-1" || input.SLAID != "" || !strings.Contains(string(payload.Variables["input"]), `"slaId":""`) {
+				t.Errorf("unexpected start input: %+v", input)
+			}
+			_, _ = writer.Write([]byte(`{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"workload-1","taskchainUuid":"task-1"}],"errors":[]}}}`))
+		case strings.Contains(payload.Query, "mutation RSCCancelBackupTaskchain"):
+			if string(payload.Variables["taskchainId"]) != `"task-1"` {
+				t.Errorf("unexpected taskchain: %s", payload.Variables["taskchainId"])
+			}
+			_, _ = writer.Write([]byte(`{"data":{"cancelTaskchain":{"success":true}}}`))
+		case strings.Contains(payload.Query, "mutation RSCCancelBackup"):
+			var input CancelBackupInput
+			if err := json.Unmarshal(payload.Variables["input"], &input); err != nil {
+				t.Error(err)
+			}
+			if input.ActivitySeriesID != "activity-1" || input.ClusterID != "cluster-1" {
+				t.Errorf("unexpected cancellation input: %+v", input)
+			}
+			_, _ = writer.Write([]byte(`{"data":{"cancelActivitySeries":true}}`))
+		default:
+			t.Errorf("unexpected operation: %s", payload.Query)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := "cursor-1"
+	page, err := client.BackupJobs(context.Background(), BackupJobsOptions{
+		First: 10, After: &cursor, WorkloadID: "workload-1", ClusterID: "cluster-1", SearchTerm: `host-"one`, Statuses: []string{"RUNNING"},
+	})
+	if err != nil || len(page.Jobs) != 1 || !page.HasNextPage || page.EndCursor == nil || *page.EndCursor != "cursor-2" {
+		t.Fatalf("unexpected job page: %+v / %v", page, err)
+	}
+	job := page.Jobs[0]
+	if job.IsCancelable == nil || !*job.IsCancelable || job.IsOnDemand == nil || *job.IsOnDemand || job.StartTime != nil ||
+		job.Progress == nil || *job.Progress != "25%" || job.WorkloadID != "workload-1" || job.ObjectID != "cdm-object" || job.Status != "Running" {
+		t.Fatalf("unexpected job: %+v", job)
+	}
+	started, err := client.StartBackup(context.Background(), StartBackupInput{WorkloadIDs: []string{job.WorkloadID}})
+	if err != nil || len(started.Taskchains) != 1 || started.Taskchains[0].TaskchainID != "task-1" {
+		t.Fatalf("unexpected initiation: %+v / %v", started, err)
+	}
+	if accepted, err := client.CancelBackupTaskchain(context.Background(), started.Taskchains[0].TaskchainID); err != nil || !accepted {
+		t.Fatalf("taskchain cancellation: %v / %v", accepted, err)
+	}
+	if accepted, err := client.CancelBackup(context.Background(), CancelBackupInput{ActivitySeriesID: job.ActivitySeriesID, ClusterID: job.ClusterID}); err != nil || !accepted {
+		t.Fatalf("activity cancellation: %v / %v", accepted, err)
+	}
+	if requests != 4 {
+		t.Fatalf("requests = %d, want 4", requests)
+	}
+}
+
+func TestBackupJobResponses(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		operation    string
+		body         string
+		wantError    bool
+		wantTasks    int
+		wantFailures int
+	}{
+		{name: "empty listing", operation: "list", body: `{"data":{"activitySeriesConnection":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}`},
+		{name: "missing listing", operation: "list", body: `{"data":{}}`, wantError: true},
+		{name: "missing nodes", operation: "list", body: `{"data":{"activitySeriesConnection":{"pageInfo":{"hasNextPage":false}}}}`, wantError: true},
+		{name: "missing page status", operation: "list", body: `{"data":{"activitySeriesConnection":{"nodes":[],"pageInfo":{}}}}`, wantError: true},
+		{name: "missing cursor", operation: "list", body: `{"data":{"activitySeriesConnection":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}`, wantError: true},
+		{name: "nonadvancing cursor", operation: "list", body: `{"data":{"activitySeriesConnection":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}`, wantError: true},
+		{name: "missing identity", operation: "list", body: `{"data":{"activitySeriesConnection":{"nodes":[{"activitySeriesId":"activity"}],"pageInfo":{"hasNextPage":false}}}}`, wantError: true},
+		{name: "partial start", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"workload-1","taskchainUuid":"task-1"}],"errors":[{"workloadId":"workload-2","error":"permission denied"}]}}}`, wantError: true, wantTasks: 1, wantFailures: 1},
+		{name: "failed start", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[],"errors":[{"workloadId":"workload-1","error":"unsupported"},{"workloadId":"workload-2","error":"unsupported"}]}}}`, wantError: true, wantFailures: 2},
+		{name: "missing start", operation: "start", body: `{"data":{"takeOnDemandSnapshot":null}}`, wantError: true},
+		{name: "missing start outcomes", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{}}}`, wantError: true},
+		{name: "omitted workload", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"workload-1","taskchainUuid":"task-1"}],"errors":[]}}}`, wantError: true, wantTasks: 1},
+		{name: "duplicate outcome", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"workload-1","taskchainUuid":"task-1"},{"workloadId":"workload-1","taskchainUuid":"task-1"}],"errors":[]}}}`, wantError: true, wantTasks: 2},
+		{name: "unexpected workload", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"other","taskchainUuid":"task-1"}],"errors":[]}}}`, wantError: true, wantTasks: 1},
+		{name: "missing task ID", operation: "start", body: `{"data":{"takeOnDemandSnapshot":{"taskchainUuids":[{"workloadId":"workload-1"}],"errors":[]}}}`, wantError: true, wantTasks: 1},
+		{name: "cancel rejected", operation: "cancel", body: `{"data":{"cancelActivitySeries":false}}`, wantError: true},
+		{name: "cancel missing", operation: "cancel", body: `{"data":{}}`, wantError: true},
+		{name: "task cancel rejected", operation: "task", body: `{"data":{"cancelTaskchain":{"success":false}}}`, wantError: true},
+		{name: "task cancel missing", operation: "task", body: `{"data":{"cancelTaskchain":null}}`, wantError: true},
+		{name: "task cancel status missing", operation: "task", body: `{"data":{"cancelTaskchain":{}}}`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+				requests++
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			var err error
+			switch test.operation {
+			case "list":
+				options := BackupJobsOptions{}
+				if test.name == "nonadvancing cursor" {
+					cursor := "same"
+					options.After = &cursor
+				}
+				page, listErr := FetchBackupJobs(context.Background(), server.Client(), server.URL, options)
+				err = listErr
+				if !test.wantError && (page.Jobs == nil || len(page.Jobs) != 0 || page.HasNextPage) {
+					t.Fatalf("unexpected empty page: %+v", page)
+				}
+				if test.wantError && page.Jobs != nil {
+					t.Fatal("listing failure returned partial jobs")
+				}
+			case "start":
+				result, startErr := StartBackup(context.Background(), server.Client(), server.URL, StartBackupInput{WorkloadIDs: []string{"workload-1", "workload-2"}, SLAID: "sla-1"})
+				err = startErr
+				if len(result.Taskchains) != test.wantTasks || len(result.Errors) != test.wantFailures {
+					t.Fatalf("lost mutation outcomes: %+v", result)
+				}
+			case "cancel":
+				accepted, cancelErr := CancelBackup(context.Background(), server.Client(), server.URL, CancelBackupInput{ActivitySeriesID: "activity-1", ClusterID: "cluster-1"})
+				err = cancelErr
+				if accepted {
+					t.Fatal("unacknowledged cancellation reported success")
+				}
+			case "task":
+				accepted, cancelErr := CancelBackupTaskchain(context.Background(), server.Client(), server.URL, "task-1")
+				err = cancelErr
+				if accepted {
+					t.Fatal("unacknowledged taskchain cancellation reported success")
+				}
+			}
+			if (err != nil) != test.wantError || requests != 1 {
+				t.Fatalf("error/requests = %v/%d, want error=%v and one request", err, requests, test.wantError)
+			}
+		})
+	}
+}
+
+func TestBackupJobRequestsNotReplayed(t *testing.T) {
+	for _, operation := range []string{"list", "start", "cancel", "task"} {
+		for _, failure := range []string{"HTTP", "GraphQL", "canceled"} {
+			t.Run(operation+"/"+failure, func(t *testing.T) {
+				requests := 0
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+					requests++
+					writer.Header().Set("Content-Type", "application/json")
+					if failure == "HTTP" {
+						writer.WriteHeader(http.StatusServiceUnavailable)
+						_, _ = writer.Write([]byte(`{"message":"unavailable"}`))
+					} else {
+						_, _ = writer.Write([]byte(`{"errors":[{"message":"not authorized"}]}`))
+					}
+				}))
+				defer server.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if failure == "canceled" {
+					cancel()
+				}
+				var err error
+				switch operation {
+				case "list":
+					_, err = FetchBackupJobs(ctx, server.Client(), server.URL, BackupJobsOptions{})
+				case "start":
+					_, err = StartBackup(ctx, server.Client(), server.URL, StartBackupInput{WorkloadIDs: []string{"workload-1"}})
+				case "cancel":
+					_, err = CancelBackup(ctx, server.Client(), server.URL, CancelBackupInput{ActivitySeriesID: "activity-1", ClusterID: "cluster-1"})
+				case "task":
+					_, err = CancelBackupTaskchain(ctx, server.Client(), server.URL, "task-1")
+				}
+				wantRequests := 1
+				if failure == "canceled" {
+					wantRequests = 0
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("cancellation identity lost: %v", err)
+					}
+				}
+				if err == nil || requests != wantRequests {
+					t.Fatalf("error/requests = %v/%d, want error and %d requests", err, requests, wantRequests)
+				}
+			})
+		}
+	}
+}
+
+func TestBackupJobInvalidInputs(t *testing.T) {
+	for _, input := range []StartBackupInput{
+		{}, {WorkloadIDs: []string{""}}, {WorkloadIDs: []string{" workload-1"}},
+		{WorkloadIDs: []string{"workload-1", "WORKLOAD-1"}},
+	} {
+		if _, err := StartBackup(context.Background(), nil, "", input); err == nil || !strings.Contains(err.Error(), "backup initiation") {
+			t.Errorf("invalid start input %+v: %v", input, err)
+		}
+	}
+	for _, input := range []CancelBackupInput{{}, {ActivitySeriesID: "activity"}, {ClusterID: "cluster"}} {
+		if _, err := CancelBackup(context.Background(), nil, "", input); err == nil || !strings.Contains(err.Error(), "backup cancellation") {
+			t.Errorf("invalid cancel input %+v: %v", input, err)
+		}
+	}
+	if _, err := CancelBackupTaskchain(context.Background(), nil, "", " "); err == nil || !strings.Contains(err.Error(), "taskchain ID") {
+		t.Errorf("empty taskchain input: %v", err)
+	}
+	cursor := " "
+	for _, options := range []BackupJobsOptions{{First: -1}, {First: 101}, {After: &cursor}} {
+		if _, err := FetchBackupJobs(context.Background(), nil, "", options); err == nil || !strings.Contains(err.Error(), "backup jobs") {
+			t.Errorf("invalid listing options %+v: %v", options, err)
+		}
+	}
+}
 
 func TestParseRSCTimeframe(t *testing.T) {
 	baseTime := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)

@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.1.2 - 2026-11-03
 
+- Add paged backup job listing with workload/cluster/status filters, progress,
+  activity-series cancellation IDs, and presence-aware cancelability metadata.
+- Add on-demand backup initiation with per-workload taskchain IDs and errors;
+  preserve partial successes and reject missing or inconsistent outcomes.
+- Add separate activity-series and taskchain cancellation methods with explicit
+  acknowledgement handling, one SDK attempt, and no automatic mutation replay.
+- Test lifecycle payloads, partial starts, invalid inputs, incomplete pages,
+  rejected cancellations, GraphQL/HTTP failures, and canceled contexts.
 - Add reusable NAS primary-fileset inventory with share/workload IDs and
   configured, effective and pending SLA references.
 - Correct NAS SLA assignments to use primary-fileset configured/effective

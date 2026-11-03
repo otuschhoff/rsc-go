@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.1.1`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.1.2`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -69,7 +69,8 @@ application.
 
 Typed client methods cover clusters, health/capacity, SLA lists/details and
 assignments, filesets/templates, NAS objects/shares/sources, target mappings,
-workload snapshots, backup activities and snapshot/activity enrichment.
+workload snapshots, backup activities/jobs, on-demand backup initiation,
+cancellation, and snapshot/activity enrichment.
 Package-level functions also accept an authorized HTTP client and exact endpoint.
 `GraphQL` is the explicit custom-operation escape hatch; it decodes the complete
 GraphQL envelope, not just `data`.
@@ -111,6 +112,62 @@ For exports across multiple policies, fetch the inventory once and pass it to
 `Client.AssignmentsWithNAS` / `FetchSLAAssignmentsWithNAS`. A non-nil empty slice
 means authoritative empty inventory; nil requests a fresh inventory. The caller
 owns its scope and lifetime; the library adds no cache.
+
+## Backup jobs
+
+`Client.BackupJobs(ctx, BackupJobsOptions)` / `FetchBackupJobs` list backup
+activity series, including status, progress, workload UUID (`WorkloadID`),
+cluster UUID, activity-series UUID, and nullable `IsCancelable`/`IsOnDemand`.
+These IDs are distinct from the CDM `ObjectID`. The read always filters for
+backup activities; optional filters include workload, cluster, search term, and
+the tenant's `EventStatus` values. Historical and running jobs are included
+unless a status filter is supplied. Existing `BackupActivities` is unchanged.
+
+Each call fetches one page: `First` is 1-100 (default 100), `After` is the
+previous page's opaque `EndCursor`, and `HasNextPage` indicates continuation.
+Callers own traversal limits, cursor-cycle detection across calls, and deadlines.
+Missing connections, identities, page status, and nonadvancing continuation
+cursors return errors without partial pages. Successful empty pages have
+non-nil `Jobs` slices.
+
+`Client.StartBackup(ctx, StartBackupInput)` / `StartBackup` submit on-demand
+backups through `takeOnDemandSnapshot`. Supply nonempty, unique workload UUIDs
+in `WorkloadIDs` and a retention `SLAID`, which the API permits to be empty.
+Only workloads supported by the tenant's operation can be started.
+
+```go
+result, err := client.StartBackup(ctx, rsc.StartBackupInput{
+    WorkloadIDs: []string{workloadID},
+    SLAID:       retentionSLAID,
+})
+```
+
+Always inspect `result.Taskchains` and `result.Errors`, including when `err`
+is non-nil: a batch can partially succeed. Missing or inconsistent outcomes
+also return an error and preserve the returned result. Taskchain IDs acknowledge
+submission, not successful backup completion. A transport or protocol failure
+may leave the submission outcome unknown; reconcile before retrying, rather than
+blindly repeating the batch.
+
+`Client.CancelBackup(ctx, CancelBackupInput)` / `CancelBackup` cancel a listed
+activity using both its `ActivitySeriesID` and `ClusterID`.
+`Client.CancelBackupTaskchain(ctx, taskchainID)` / `CancelBackupTaskchain` use
+the taskchain ID returned by initiation instead. Do not interchange these IDs.
+`IsCancelable == nil` means unknown; permissions and current cancelability remain
+server-authoritative. Cancel calls return `true` only when RSC acknowledges the
+request; rejection or a missing acknowledgement returns an error. Acknowledgement
+does not prove that the job has reached its terminal canceled state; check the
+job status afterward.
+
+All four new operations use the caller's authorized HTTP client through the SDK,
+with one attempt per call and no automatic mutation replay, fallback, polling,
+or added credentials. Use contexts with deadlines. Operation availability,
+workload coverage, permissions, and actual execution require tenant validation;
+tests use synthetic fixtures and never start or cancel live backups.
+
+Schema contracts: [takeOnDemandSnapshot](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/mutations/takeOnDemandSnapshot/),
+[cancelActivitySeries](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/mutations/cancelActivitySeries/),
+and [cancelTaskchain](https://developer.rubrik.com/Rubrik-Security-Cloud-API/API-Reference/mutations/cancelTaskchain/).
 
 ## Cluster member load
 
@@ -174,7 +231,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.1.1
+require github.com/otuschhoff/rsc-go v0.1.2
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```
