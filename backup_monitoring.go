@@ -129,6 +129,9 @@ type backupActivityObservationWire struct {
 	SeriesID           string                        `json:"activitySeriesId"`
 	WorkloadID         string                        `json:"fid"`
 	ClusterID          string                        `json:"clusterUuid"`
+	ObjectName         monitoringNullable[string]    `json:"objectName"`
+	ObjectType         monitoringNullable[string]    `json:"objectType"`
+	SLADomainName      monitoringNullable[string]    `json:"slaDomainName"`
 	LastActivityType   string                        `json:"lastActivityType"`
 	LastActivityStatus string                        `json:"lastActivityStatus"`
 	StartTime          monitoringNullable[time.Time] `json:"startTime"`
@@ -153,6 +156,15 @@ func (observation BackupActivityObservation) WorkloadID() string {
 	return observation.source.WorkloadID
 }
 func (observation BackupActivityObservation) ClusterID() string { return observation.source.ClusterID }
+func (observation BackupActivityObservation) ObjectName() (string, bool) {
+	return observation.source.ObjectName.value, observation.source.ObjectName.known
+}
+func (observation BackupActivityObservation) ObjectType() (string, bool) {
+	return observation.source.ObjectType.value, observation.source.ObjectType.known
+}
+func (observation BackupActivityObservation) SLADomainName() (string, bool) {
+	return observation.source.SLADomainName.value, observation.source.SLADomainName.known
+}
 func (observation BackupActivityObservation) LastActivityType() string {
 	return observation.source.LastActivityType
 }
@@ -393,7 +405,7 @@ func readBackupActivityObservations(ctx context.Context, client *http.Client, en
 	}
 	const query = `query RSCBackupActivityObservations($first: Int!, $after: String, $filters: ActivitySeriesFilter) {
 		activitySeriesConnection(first: $first, after: $after, filters: $filters) {
-			nodes { activitySeriesId fid clusterUuid lastActivityType lastActivityStatus startTime lastUpdated
+			nodes { activitySeriesId fid clusterUuid objectName objectType slaDomainName lastActivityType lastActivityStatus startTime lastUpdated
 				lastEventAddedAt lastVerifiedAt dataTransferred logicalSize attemptNumber isPolarisEventSeries }
 			pageInfo { endCursor hasNextPage }
 		}

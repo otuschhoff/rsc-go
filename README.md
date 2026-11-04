@@ -4,7 +4,7 @@ Reusable Rubrik Security Cloud inventory, monitoring, SLA, NAS/fileset and
 snapshot routines, extracted from opsctl. Module:
 `github.com/otuschhoff/rsc-go`; package name: `rsc`.
 
-Current release: `v0.5.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+Current release: `v0.5.1`. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 The official Rubrik Polaris SDK v1.11.0 executes **every GraphQL request**.
 Its service-account token source and transport also provide standalone
@@ -438,6 +438,15 @@ status fails the read as mutable-source inconsistency, not silently skipped
 completion evidence. Use the existing windowed reader with no status filter to
 retain raw terminal and future states in series-update observations.
 
+`ObjectName()`, `ObjectType()` and `SLADomainName()` return the activity series'
+raw source label, source type and reported SLA name as `(string, bool)` values.
+Null/absent labels are unknown; a present empty string remains known and empty.
+These fields are fetched on the same bounded page, without extra lookups or a
+join to the workload's current SLA assignment. The series exposes no SLA ID, and
+the name does not certify the policy configuration used by an entire execution.
+Labels are included in source fingerprints but remain private in opaque default
+JSON serialization. Callers must explicitly choose whether to persist names.
+
 `Scope` is the output selection and `SourceScope` is the identical exact
 server-side predicate; there is no local scope expansion/filtering or enrichment.
 `Statuses` records the selected filters. `ScannedResults` and `Results` count
@@ -445,7 +454,7 @@ validated source rows (equal on successful reads); failed-read counts remain
 diagnostic, not partial observations. Both scopes and selectors are copied.
 All original explicit limits apply: 1-100 entries/page, 1-100 pages, 1-10000 rows,
 duration greater than zero and at most one minute, 4 MiB per response, 4096-byte
-cursors, one SDK attempt per page, and shorter caller deadlines. Missing selected
+cursors, one SDK attempt per page, and shorter caller deadlines. Missing mandatory
 fields, invalid/out-of-scope IDs, duplicates, inconsistent statuses, cursor
 faults, denied access and exceeded bounds return nil observations and
 `Complete == false`. No continuation is a safe reconciliation checkpoint.
@@ -754,7 +763,7 @@ procedure. Go does not propagate dependency `replace` directives. Consumers must
 explicitly replace the SDK with the nested module at the recorded SDK revision:
 
 ```go
-require github.com/otuschhoff/rsc-go v0.5.0
+require github.com/otuschhoff/rsc-go v0.5.1
 
 replace github.com/rubrikinc/rubrik-polaris-sdk-for-go => github.com/otuschhoff/rsc-go/third_party/rubrik-polaris-sdk-for-go v0.0.0-20261102173521-d9afd9c9fb40
 ```

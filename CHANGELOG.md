@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.1 - 2026-11-04
+
+- Add nullable `ObjectName`, `ObjectType` and `SLADomainName` getters to opaque
+  backup activity observations. Select the corresponding schema-verified RSC
+  fields in the existing bounded activity query for active and windowed reads.
+- Preserve null/absent versus present-empty labels, source fingerprints and
+  private default JSON serialization. SLA names are series-reported labels, not
+  verified execution policy IDs or joins to current workload assignments.
+- Retain exact scope, active-state selection, one attempt per page, deadlines,
+  pagination/result/cursor limits and the 4 MiB response cap. Add no enrichment
+  requests, inventory scans, authentication changes or execution guarantees.
+- Test present, null, absent, empty and malformed metadata alongside the existing
+  active-read scope, limit, cancellation and error regression suite.
+
 ## v0.5.0 - 2026-11-03
 
 - Add bounded `ReadActiveBackupActivityObservations` for exact-scoped backup

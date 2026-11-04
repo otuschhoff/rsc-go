@@ -17,6 +17,70 @@ const monitoringFixtureCluster = "00000000-0000-4000-8000-000000000002"
 const monitoringFixtureSeries = "00000000-0000-4000-8000-000000000003"
 const monitoringFixtureTaskchain = "00000000-0000-4000-8000-000000000010"
 
+func TestActiveBackupActivityMetadata(t *testing.T) {
+	for _, scenario := range []string{"present", "null", "absent", "empty", "malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			requests := 0
+			client := &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
+				requests++
+				var operation struct{ Query string }
+				if json.NewDecoder(request.Body).Decode(&operation) != nil {
+					t.Fatal("cannot decode metadata query")
+				}
+				for _, field := range []string{"objectName", "objectType", "slaDomainName"} {
+					if !strings.Contains(operation.Query, field) {
+						t.Fatalf("metadata query omitted %s", field)
+					}
+				}
+				row := monitoringFixtureRow()
+				for field, value := range map[string]string{"objectName": `fixture "source"`, "objectType": "VmwareVm", "slaDomainName": "Daily fixture"} {
+					switch scenario {
+					case "present":
+						row[field] = value
+					case "null":
+						row[field] = nil
+					case "empty":
+						row[field] = ""
+					case "malformed":
+						row[field] = 123
+					}
+				}
+				body, _ := json.Marshal(monitoringFixtureConnection([]any{row}, false, nil))
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body))), Request: request}, nil
+			})}
+			options := BackupActiveActivityReadOptions{Scope: monitoringFixtureOptions().Scope, Statuses: []string{"RUNNING"}, Limits: monitoringFixtureOptions().Limits}
+			read, err := ReadActiveBackupActivityObservations(t.Context(), client, "https://fixture.invalid/api/graphql", options)
+			if scenario == "malformed" {
+				if err == nil || read.Complete || read.Observations != nil {
+					t.Fatal("malformed metadata returned a complete read")
+				}
+				return
+			}
+			if err != nil || len(read.Observations) != 1 || requests != 1 {
+				t.Fatalf("metadata read changed bounds: %v", err)
+			}
+			observation := read.Observations[0]
+			for _, metadata := range []struct {
+				get  func() (string, bool)
+				want string
+			}{{observation.ObjectName, `fixture "source"`}, {observation.ObjectType, "VmwareVm"}, {observation.SLADomainName, "Daily fixture"}} {
+				value, known := metadata.get()
+				wantKnown := scenario == "present" || scenario == "empty"
+				if scenario != "present" {
+					metadata.want = ""
+				}
+				if known != wantKnown || value != metadata.want {
+					t.Fatal("metadata presence or raw value changed")
+				}
+			}
+			encoded, _ := json.Marshal(observation)
+			if string(encoded) != "{}" {
+				t.Fatal("private metadata escaped opaque observation")
+			}
+		})
+	}
+}
+
 func TestActiveBackupActivityReadFailuresAndBounds(t *testing.T) {
 	for _, scenario := range []string{"empty", "missing connection", "missing nodes", "missing page info", "missing page status", "missing time", "missing bytes",
 		"null row", "out of scope", "duplicate", "unknown state", "terminal state", "missing cursor", "long cursor", "cycle", "page limit", "result limit", "oversize", "malformed", "denied", "transport", "canceled", "deadline"} {
